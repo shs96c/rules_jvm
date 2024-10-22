@@ -60,6 +60,11 @@ const (
 	// Can be either "true" or "false". Defaults to "true".
 	// Inherited by children packages, can only be set at the root of the repository.
 	JavaResolveToJavaExports = "java_resolve_to_java_exports"
+
+	// JvmKotlinEnabled tells the code generator whether to support `kt_jvm_library` rules for Kotlin sources.
+	// Can be either "true" or "false". Defaults to "false".
+	// This requires importing the `@rules_kotlin` repository into your workspace.
+	JvmKotlinEnabled = "jvm_kotlin_enabled"
 )
 
 // Configs is an extension of map[string]*Config. It provides finding methods
@@ -83,6 +88,7 @@ func (c *Config) NewChild() *Config {
 		isModuleRoot:           false,
 		generateProto:          true,
 		resolveToJavaExports:   c.resolveToJavaExports,
+		kotlinEnabled:          c.kotlinEnabled,
 		mavenInstallFile:       c.mavenInstallFile,
 		moduleGranularity:      c.moduleGranularity,
 		repoRoot:               c.repoRoot,
@@ -114,6 +120,7 @@ type Config struct {
 	isModuleRoot                                       bool
 	generateProto                                      bool
 	resolveToJavaExports                               *types.LateInit[bool]
+	kotlinEnabled                                      bool
 	mavenInstallFile                                   string
 	moduleGranularity                                  string
 	repoRoot                                           string
@@ -138,6 +145,7 @@ func New(repoRoot string) *Config {
 		isModuleRoot:           false,
 		generateProto:          true,
 		resolveToJavaExports:   types.NewLateInit[bool](true),
+		kotlinEnabled:          false,
 		mavenInstallFile:       "maven_install.json",
 		moduleGranularity:      "package",
 		repoRoot:               repoRoot,
@@ -171,6 +179,14 @@ func (c *Config) GenerateProto() bool {
 
 func (c *Config) SetGenerateProto(generate bool) {
 	c.generateProto = generate
+}
+
+func (c *Config) KotlinEnabled() bool {
+	return c.kotlinEnabled
+}
+
+func (c *Config) SetKotlinEnabled(enabled bool) {
+	c.kotlinEnabled = enabled
 }
 
 func (c *Config) MavenRepositoryName() string {

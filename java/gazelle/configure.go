@@ -67,6 +67,7 @@ func (jc *Configurer) KnownDirectives() []string {
 		javaconfig.JavaMavenRepositoryName,
 		javaconfig.JavaAnnotationProcessorPlugin,
 		javaconfig.JavaResolveToJavaExports,
+		javaconfig.JvmKotlinEnabled,
 	}
 }
 
@@ -168,8 +169,18 @@ func (jc *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 					jc.lang.logger.Fatal().Msgf("invalid value for directive %q: %s: possible values are true/false",
 						javaconfig.JavaResolveToJavaExports, d.Value)
 				}
-			}
 
+			case javaconfig.JvmKotlinEnabled:
+				switch d.Value {
+				case "true":
+					cfg.SetKotlinEnabled(true)
+				case "false":
+					cfg.SetKotlinEnabled(false)
+				default:
+					jc.lang.logger.Fatal().Msgf("invalid value for directive %q: %s: possible values are true/false",
+						javaconfig.JvmKotlinEnabled, d.Value)
+				}
+			}
 		}
 	}
 
