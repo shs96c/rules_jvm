@@ -92,11 +92,6 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		log.Fatal().Err(err).Str("package", args.Rel).Msg("Failed to parse package")
 	}
 
-	l.logger.Debug().Msgf("Parsed package: %v", javaPkg.Name.Name)
-	for _, m := range javaPkg.Mains.SortedSlice() {
-		l.logger.Debug().Msgf("Found main file: %v", m)
-	}
-
 	// We exclude intra-package imports to avoid self-dependencies.
 	// This isn't a great heuristic for a few reasons:
 	//  1. We may want to split targets with more granularity than per-package.
@@ -105,7 +100,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	// But it will do for now.
 	likelyLocalClassNames := sorted_set.NewSortedSet([]string{})
 	for _, filename := range srcFilenamesRelativeToPackage {
-		if (strings.HasSuffix(filename, ".kt")) {
+		if strings.HasSuffix(filename, ".kt") {
 			fileWithoutExtension := strings.TrimSuffix(filename, ".kt")
 			likelyLocalClassNames.Add(fileWithoutExtension)
 			// Top level values and functions in Kotlin are accessible from Java under the <filename>Kt class.
@@ -228,7 +223,11 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	}
 
 	if productionJavaFiles.Len() > 0 {
-		l.generateJavaLibrary(args.File, args.Rel, filepath.Base(args.Rel), productionJavaFiles.SortedSlice(), allPackageNames, nonLocalProductionJavaImports, nonLocalJavaExports, annotationProcessorClasses, false, javaLibraryKind, &res, cfg, args.Config.RepoName)
+		var implicitDeps []types.ClassName
+		if !isModule {
+			implicitDeps = javaPkg.ImplicitDeps
+		}
+		l.generateJavaLibrary(args.File, args.Rel, filepath.Base(args.Rel), productionJavaFiles.SortedSlice(), allPackageNames, nonLocalProductionJavaImports, nonLocalJavaExports, annotationProcessorClasses, false, javaLibraryKind, &res, cfg, args.Config.RepoName, implicitDeps)
 	}
 
 	var testHelperJavaClasses *sorted_set.SortedSet[types.ClassName]
@@ -264,7 +263,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				testJavaImportsWithHelpers.Add(tf.pkg)
 				srcs = append(srcs, tf.pathRelativeToBazelWorkspaceRoot)
 			}
-			l.generateJavaLibrary(args.File, args.Rel, filepath.Base(args.Rel), srcs, packages, testJavaImports, nonLocalJavaExports, annotationProcessorClasses, true, javaLibraryKind, &res, cfg, args.Config.RepoName)
+			l.generateJavaLibrary(args.File, args.Rel, filepath.Base(args.Rel), srcs, packages, testJavaImports, nonLocalJavaExports, annotationProcessorClasses, true, javaLibraryKind, &res, cfg, args.Config.RepoName, []types.ClassName{})
 		}
 	}
 
@@ -499,9 +498,8 @@ func accumulateJavaFile(cfg *javaconfig.Config, testJavaFiles, testHelperJavaFil
 	}
 }
 
-func (l javaLang) generateJavaLibrary(file *rule.File, pathToPackageRelativeToBazelWorkspace, name string, srcsRelativeToBazelWorkspace []string, packages, imports, exports *sorted_set.SortedSet[types.PackageName], annotationProcessorClasses *sorted_set.SortedSet[types.ClassName], testonly bool, javaLibraryRuleKind string, res *language.GenerateResult, cfg *javaconfig.Config, repoName string) {
-	const ruleKind = "java_library"
-	r := rule.NewRule(ruleKind, name)
+func (l javaLang) generateJavaLibrary(file *rule.File, pathToPackageRelativeToBazelWorkspace, name string, srcsRelativeToBazelWorkspace []string, packages, imports, exports *sorted_set.SortedSet[types.PackageName], annotationProcessorClasses *sorted_set.SortedSet[types.ClassName], testonly bool, javaLibraryRuleKind string, res *language.GenerateResult, cfg *javaconfig.Config, repoName string, implicitDeps []types.ClassName) {
+	r := rule.NewRule(javaLibraryRuleKind, name)
 
 	srcs := make([]string, 0, len(srcsRelativeToBazelWorkspace))
 	for _, src := range srcsRelativeToBazelWorkspace {
@@ -534,6 +532,7 @@ func (l javaLang) generateJavaLibrary(file *rule.File, pathToPackageRelativeToBa
 		ImportedPackageNames: imports,
 		ExportedPackageNames: exports,
 		AnnotationProcessors: annotationProcessorClasses,
+		ImplicitDeps:         implicitDeps,
 	}
 	res.Imports = append(res.Imports, resolveInput)
 
