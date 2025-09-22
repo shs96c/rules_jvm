@@ -2,6 +2,7 @@ package cycles
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -48,37 +49,32 @@ type GroupPlan struct {
 	Exports  *sorted_set.SortedSet[types.PackageName]
 }
 
-// Planner builds a one-time plan for cycle consolidation for package mode.
+// Planner plans cycle consolidation decisions lazily.
 
 type Planner struct {
-	planned bool
-
 	// Inputs
-	RepoRoot  string
-	Workspace string // empty string represents repo root rel path
+	RepoRoot string
 
 	// Data
 	dirs          map[string]*DirInfo        // rel -> info
-	pkgToDir      map[string]string          // fully qualified package name -> rel
+	pkgToDir      map[string]string          // package name -> rel
 	graph         map[string]map[string]bool // adjacency list: rel -> set of rels
-	groups        []*GroupPlan               // final merged group plans
-	dirToGroupLCA map[string]string          // rel -> group's LCA rel (for suppressed detection)
-	lcaToGroup    map[string]*GroupPlan      // LCA rel -> plan
+	groups        []*GroupPlan               // finalized groups
+	dirToGroupLCA map[string]string          // rel -> group's LCA rel
+	lcaToGroup    map[string]*GroupPlan      // LCA -> group plan
 }
 
 func NewPlanner(repoRoot string) *Planner {
 	return &Planner{
 		RepoRoot:      repoRoot,
-		Workspace:     "",
 		dirs:          make(map[string]*DirInfo),
 		pkgToDir:      make(map[string]string),
 		graph:         make(map[string]map[string]bool),
+		groups:        []*GroupPlan{},
 		dirToGroupLCA: make(map[string]string),
 		lcaToGroup:    make(map[string]*GroupPlan),
 	}
 }
-
-func (p *Planner) IsPlanned() bool { return p.planned }
 
 func (p *Planner) IsSuppressed(rel string) bool {
 	lca, ok := p.dirToGroupLCA[rel]
@@ -95,199 +91,266 @@ func (p *Planner) IsLCA(rel string) bool {
 
 func (p *Planner) GroupForLCA(rel string) *GroupPlan { return p.lcaToGroup[rel] }
 
-// Plan performs a one-time repository scan and computes cycle groups and their LCAs.
-// parse is a function that, given a rel dir and basenames, returns a parsed java package.
-func (p *Planner) Plan(ctx context.Context, parse func(ctx context.Context, rel string, files []string) (*jpkg.Package, error)) error {
-	if p.planned {
+// EnsureCycleDecisionForDir lazily expands the dependency subgraph reachable from rel and
+// decides whether rel participates in a cycle, and if so, computes the GroupPlan.
+func (p *Planner) EnsureCycleDecisionForDir(ctx context.Context, rel string, parse func(ctx context.Context, rel string, files []string) (*jpkg.Package, error)) error {
+	if p.IsSuppressed(rel) || p.IsLCA(rel) {
 		return nil
 	}
+	// Expand reachable subgraph
+	visited := make(map[string]bool)
+	stack := []string{rel}
+	for len(stack) > 0 {
+		d := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if visited[d] {
+			continue
+		}
+		visited[d] = true
+		if err := p.ensureParsedDir(ctx, d, parse); err != nil {
+			// best-effort: warn via returning nil; the resolve phase will warn, too.
+			continue
+		}
+		deps := p.resolveImportedPackagesToDirs(d)
+		for _, depDir := range deps {
+			// Add graph edge
+			if p.graph[d] == nil {
+				p.graph[d] = make(map[string]bool)
+			}
+			p.graph[d][depDir] = true
+			// Continue exploring
+			if !visited[depDir] {
+				stack = append(stack, depDir)
+			}
+		}
+	}
 
-	// 1) Discover candidate directories (with .java files), collect file lists.
-	candidates := make(map[string][]string)
-	err := filepath.WalkDir(p.RepoRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
+	// Build induced subgraph of visited nodes and compute SCCs
+	subgraph := make(map[string]map[string]bool)
+	for v := range visited {
+		if p.graph[v] == nil {
+			continue
 		}
-		if !d.IsDir() {
-			return nil
-		}
-		// Fast prune of hidden and bazel output dirs.
-		base := filepath.Base(path)
-		if strings.HasPrefix(base, ".") || base == "bazel-bin" || base == "bazel-out" || base == "bazel-testlogs" || base == "node_modules" {
-			return filepath.SkipDir
-		}
-		entries, rerr := os.ReadDir(path)
-		if rerr != nil {
-			return rerr
-		}
-		var javaFiles []string
-		for _, e := range entries {
-			if e.IsDir() {
+		for w := range p.graph[v] {
+			if !visited[w] {
 				continue
 			}
-			if filepath.Ext(e.Name()) == ".java" {
-				javaFiles = append(javaFiles, e.Name())
+			if subgraph[v] == nil {
+				subgraph[v] = make(map[string]bool)
+			}
+			subgraph[v][w] = true
+		}
+	}
+	sccs := stronglyConnectedComponents(subgraph)
+	for _, comp := range sccs {
+		containsRel := false
+		for _, n := range comp {
+			if n == rel {
+				containsRel = true
+				break
 			}
 		}
-		if len(javaFiles) > 0 {
-			rel, _ := filepath.Rel(p.RepoRoot, path)
-			rel = filepath.ToSlash(rel)
-			candidates[rel] = javaFiles
+		if containsRel && len(comp) >= 2 {
+			// Compute LCA and finalize group lazily
+			lca := lcaOfDirs(comp)
+			g := &GroupPlan{
+				LCA:      lca,
+				Members:  make(map[string]struct{}),
+				Packages: sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
+				Imports:  sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
+				Exports:  sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
+			}
+			for _, m := range comp {
+				g.Members[m] = struct{}{}
+				if info := p.dirs[m]; info != nil {
+					if info.PkgName.Name != "" {
+						g.Packages.Add(info.PkgName)
+					}
+					// collect srcs
+					for _, f := range info.Files {
+						g.Srcs = append(g.Srcs, filepath.ToSlash(filepath.Join(m, f)))
+					}
+					g.Imports.AddAll(info.ImportedPkgs)
+					g.Exports.AddAll(info.ExportedPkgs)
+				}
+			}
+			// include LCA dir sources if any
+			if info := p.dirs[lca]; info != nil {
+				for _, f := range info.Files {
+					g.Srcs = append(g.Srcs, filepath.ToSlash(filepath.Join(lca, f)))
+				}
+				if info.PkgName.Name != "" {
+					g.Packages.Add(info.PkgName)
+				}
+			}
+			sort.Strings(g.Srcs)
+			// Filter imports/exports to exclude intra-group packages
+			filtered := sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
+			for _, imp := range g.Imports.SortedSlice() {
+				if !g.Packages.Contains(imp) {
+					filtered.Add(imp)
+				}
+			}
+			g.Imports = filtered
+			filtered = sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
+			for _, exp := range g.Exports.SortedSlice() {
+				if !g.Packages.Contains(exp) {
+					filtered.Add(exp)
+				}
+			}
+			g.Exports = filtered
+
+			// Record group and suppress participants
+			p.groups = append(p.groups, g)
+			p.lcaToGroup[g.LCA] = g
+			for m := range g.Members {
+				p.dirToGroupLCA[m] = g.LCA
+			}
+			return nil
 		}
+	}
+	return nil
+}
+
+func (p *Planner) ensureParsedDir(ctx context.Context, rel string, parse func(ctx context.Context, rel string, files []string) (*jpkg.Package, error)) error {
+	if _, ok := p.dirs[rel]; ok {
 		return nil
-	})
+	}
+	files, err := p.javaFilesInDir(rel)
 	if err != nil {
 		return err
 	}
-
-	// 2) Parse packages for each candidate dir.
-	for rel, files := range candidates {
-		resp, err := parse(ctx, rel, files)
-		if err != nil {
-			// Skip directories with parse errors to keep planning fast and best-effort.
-			continue
-		}
-		di := &DirInfo{
-			Rel:          rel,
-			Files:        append([]string{}, files...),
-			PkgName:      resp.Name,
-			TestPackage:  resp.TestPackage,
-			ImportedPkgs: sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
-			ExportedPkgs: sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
-		}
-		// Collect imported packages (classes and on-demand imports both reduced to package names)
-		for _, cls := range resp.ImportedClasses.SortedSlice() {
-			di.ImportedPkgs.Add(cls.PackageName())
-		}
-		di.ImportedPkgs.AddAll(resp.ImportedPackagesWithoutSpecificClasses)
-		for _, exp := range resp.ExportedClasses.SortedSlice() {
-			di.ExportedPkgs.Add(exp.PackageName())
-		}
-		p.dirs[rel] = di
-		if di.PkgName.Name != "" {
-			p.pkgToDir[di.PkgName.Name] = rel
-		}
+	if len(files) == 0 {
+		// still record empty to avoid repeated IO
+		p.dirs[rel] = &DirInfo{Rel: rel, Files: nil, PkgName: types.NewPackageName("")}
+		return nil
 	}
-
-	// 3) Build dir dependency graph
-	for rel, di := range p.dirs {
-		for _, depPkg := range di.ImportedPkgs.SortedSlice() {
-			if targetRel, ok := p.pkgToDir[depPkg.Name]; ok && targetRel != rel {
-				if p.graph[rel] == nil {
-					p.graph[rel] = make(map[string]bool)
-				}
-				p.graph[rel][targetRel] = true
-			}
-		}
+	resp, err := parse(ctx, rel, files)
+	if err != nil {
+		return err
 	}
-
-	// 4) Compute SCCs
-	sccs := stronglyConnectedComponents(p.graph)
-
-	// 5) Build initial groups from SCCs with size >= 2
-	var groups []*GroupPlan
-	for _, comp := range sccs {
-		if len(comp) < 2 {
-			continue
-		}
-		lca := lcaOfDirs(comp)
-		g := &GroupPlan{
-			LCA:      lca,
-			Members:  make(map[string]struct{}),
-			Packages: sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
-		}
-		for _, m := range comp {
-			g.Members[m] = struct{}{}
-			if info, ok := p.dirs[m]; ok {
-				if info.PkgName.Name != "" {
-					g.Packages.Add(info.PkgName)
-				}
-			}
-		}
-		groups = append(groups, g)
+	di := &DirInfo{
+		Rel:          rel,
+		Files:        append([]string{}, files...),
+		PkgName:      resp.Name,
+		TestPackage:  resp.TestPackage,
+		ImportedPkgs: sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
+		ExportedPkgs: sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
 	}
-
-	// 6) Merge overlapping groups until fixed point
-	for {
-		merged := false
-	outer:
-		for i := 0; i < len(groups); i++ {
-			for j := i + 1; j < len(groups); j++ {
-				if groupsOverlap(groups[i], groups[j]) {
-					ng := mergeGroups(groups[i], groups[j])
-					// replace i with ng, remove j
-					groups[i] = ng
-					groups = append(groups[:j], groups[j+1:]...)
-					merged = true
-					break outer
-				}
-			}
-		}
-		if !merged {
-			break
-		}
+	for _, cls := range resp.ImportedClasses.SortedSlice() {
+		di.ImportedPkgs.Add(cls.PackageName())
 	}
-
-	// 7) Populate srcs and imports/exports and maps
-	for _, g := range groups {
-		// include sources from members + LCA itself
-		members := make(map[string]struct{}, len(g.Members))
-		for m := range g.Members {
-			members[m] = struct{}{}
-		}
-		members[g.LCA] = struct{}{}
-
-		var srcs []string
-		groupImports := sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
-		groupExports := sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
-		for m := range members {
-			if info, ok := p.dirs[m]; ok {
-				for _, f := range info.Files {
-					srcs = append(srcs, filepath.ToSlash(filepath.Join(m, f)))
-				}
-				groupImports.AddAll(info.ImportedPkgs)
-				groupExports.AddAll(info.ExportedPkgs)
-				if info.PkgName.Name != "" {
-					g.Packages.Add(info.PkgName)
-				}
-			}
-		}
-		sort.Strings(srcs)
-		g.Srcs = srcs
-
-		// Filter out intra-group packages from imports/exports
-		filtered := sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
-		for _, imp := range groupImports.SortedSlice() {
-			if !g.Packages.Contains(imp) {
-				filtered.Add(imp)
-			}
-		}
-		g.Imports = filtered
-		filtered = sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
-		for _, exp := range groupExports.SortedSlice() {
-			if !g.Packages.Contains(exp) {
-				filtered.Add(exp)
-			}
-		}
-		g.Exports = filtered
+	di.ImportedPkgs.AddAll(resp.ImportedPackagesWithoutSpecificClasses)
+	for _, exp := range resp.ExportedClasses.SortedSlice() {
+		di.ExportedPkgs.Add(exp.PackageName())
 	}
-
-	// 8) Index groups for lookup
-	p.groups = groups
-	for _, g := range groups {
-		p.lcaToGroup[g.LCA] = g
-		for m := range g.Members {
-			p.dirToGroupLCA[m] = g.LCA
-		}
+	p.dirs[rel] = di
+	if di.PkgName.Name != "" {
+		p.pkgToDir[di.PkgName.Name] = rel
 	}
-
-	p.planned = true
 	return nil
+}
+
+func (p *Planner) javaFilesInDir(rel string) ([]string, error) {
+	abs := filepath.Join(p.RepoRoot, rel)
+	ents, err := os.ReadDir(abs)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		if filepath.Ext(e.Name()) == ".java" {
+			out = append(out, e.Name())
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// resolveImportedPackagesToDirs resolves imported packages from dir to directories lazily.
+func (p *Planner) resolveImportedPackagesToDirs(dir string) []string {
+	info := p.dirs[dir]
+	if info == nil {
+		return nil
+	}
+	var out []string
+	for _, pkg := range info.ImportedPkgs.SortedSlice() {
+		if pkg.Name == "" {
+			continue
+		}
+		if d, ok := p.pkgToDir[pkg.Name]; ok {
+			if d != dir {
+				out = append(out, d)
+			}
+			continue
+		}
+		if d, ok := p.findDirForPackage(pkg.Name); ok {
+			p.pkgToDir[pkg.Name] = d
+			if d != dir {
+				out = append(out, d)
+			}
+		} else {
+			// negative cache to avoid repeated scans
+			p.pkgToDir[pkg.Name] = ""
+		}
+	}
+	return out
+}
+
+// findDirForPackage scans the repo until it finds a .java file whose package declaration matches pkgName.
+// Returns (dir, true) if found, otherwise ("", false).
+func (p *Planner) findDirForPackage(pkgName string) (string, bool) {
+	var found string
+	_ = filepath.WalkDir(p.RepoRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			base := filepath.Base(path)
+			if strings.HasPrefix(base, ".") || base == "bazel-bin" || base == "bazel-out" || base == "bazel-testlogs" || base == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filepath.Ext(path) != ".java" {
+			return nil
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			return nil
+		}
+		defer f.Close()
+		buf := make([]byte, 8192)
+		n, _ := io.ReadFull(f, buf)
+		if n <= 0 {
+			return nil
+		}
+		content := string(buf[:n])
+		if idx := strings.Index(content, "package "); idx >= 0 {
+			rest := content[idx+len("package "):]
+			if semi := strings.Index(rest, ";"); semi >= 0 {
+				pkg := strings.TrimSpace(rest[:semi])
+				if pkg == pkgName {
+					dir := filepath.ToSlash(filepath.Dir(path))
+					rel, _ := filepath.Rel(p.RepoRoot, dir)
+					found = filepath.ToSlash(rel)
+					return io.EOF // stop early
+				}
+			}
+		}
+		return nil
+	})
+	if found != "" {
+		return found, true
+	}
+	return "", false
 }
 
 // stronglyConnectedComponents returns SCCs as slices of rel paths.
 func stronglyConnectedComponents(graph map[string]map[string]bool) [][]string {
-	// Tarjan's algorithm
 	index := 0
 	indices := make(map[string]int)
 	lowlink := make(map[string]int)
@@ -314,7 +377,6 @@ func stronglyConnectedComponents(graph map[string]map[string]bool) [][]string {
 				}
 			}
 		}
-		// If v is a root node, pop the stack and output an SCC
 		if lowlink[v] == indices[v] {
 			var comp []string
 			for {
@@ -329,37 +391,22 @@ func stronglyConnectedComponents(graph map[string]map[string]bool) [][]string {
 			sccs = append(sccs, comp)
 		}
 	}
-
-	// ensure all nodes included
 	for v := range graph {
 		if _, seen := indices[v]; !seen {
 			visit(v)
 		}
 	}
-
 	return sccs
 }
 
-// DirInfo returns the collected information for a directory, if any.
-func (p *Planner) DirInfo(rel string) *DirInfo {
-	return p.dirs[rel]
-}
-
-func splitPath(rel string) []string {
-	if rel == "" {
-		return []string{}
-	}
-	return strings.Split(rel, "/")
-}
-
+// lcaOfDirs returns the lowest common ancestor directory (by path prefix) of a list of repo-relative directories.
 func lcaOfDirs(dirs []string) string {
 	if len(dirs) == 0 {
 		return ""
 	}
-	parts := splitPath(dirs[0])
+	parts := strings.Split(dirs[0], "/")
 	for i := 1; i < len(dirs); i++ {
-		p := splitPath(dirs[i])
-		// shrink parts to common prefix
+		p := strings.Split(dirs[i], "/")
 		j := 0
 		for j < len(parts) && j < len(p) && parts[j] == p[j] {
 			j++
@@ -370,69 +417,4 @@ func lcaOfDirs(dirs []string) string {
 		}
 	}
 	return strings.Join(parts, "/")
-}
-
-func isAncestorDir(ancestor, child string) bool {
-	if ancestor == child {
-		return true
-	}
-	if ancestor == "" {
-		return true
-	}
-	if !strings.HasPrefix(child, ancestor+"/") {
-		return false
-	}
-	return true
-}
-
-func groupsOverlap(a, b *GroupPlan) bool {
-	// Overlap if shared members
-	for m := range a.Members {
-		if _, ok := b.Members[m]; ok {
-			return true
-		}
-	}
-	// Or one's LCA inside the other's subtree
-	if isAncestorDir(a.LCA, b.LCA) || isAncestorDir(b.LCA, a.LCA) {
-		return true
-	}
-	// Or any member under the other's LCA
-	for m := range a.Members {
-		if isAncestorDir(b.LCA, m) {
-			return true
-		}
-	}
-	for m := range b.Members {
-		if isAncestorDir(a.LCA, m) {
-			return true
-		}
-	}
-	return false
-}
-
-func mergeGroups(a, b *GroupPlan) *GroupPlan {
-	ng := &GroupPlan{
-		Members:  make(map[string]struct{}),
-		Packages: sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess),
-	}
-	for m := range a.Members {
-		ng.Members[m] = struct{}{}
-	}
-	for m := range b.Members {
-		ng.Members[m] = struct{}{}
-	}
-	// recompute LCA across all members' rels
-	var rels []string
-	for m := range ng.Members {
-		rels = append(rels, m)
-	}
-	sort.Strings(rels)
-	ng.LCA = lcaOfDirs(rels)
-	for _, p := range a.Packages.SortedSlice() {
-		ng.Packages.Add(p)
-	}
-	for _, p := range b.Packages.SortedSlice() {
-		ng.Packages.Add(p)
-	}
-	return ng
 }

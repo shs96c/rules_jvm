@@ -59,18 +59,32 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 
 	isModule := cfg.ModuleGranularity() == "module"
 
-	// One-time cycle planning for package mode
+	// Lazy cycle planning for package mode
 	if !isModule {
 		if l.cyclePlanner == nil {
 			l.cyclePlanner = cycles.NewPlanner(args.Config.RepoRoot)
 		}
-		if !l.cyclePlanner.IsPlanned() {
-			// Plan using the existing parser
-			err := l.cyclePlanner.Plan(context.Background(), func(ctx context.Context, rel string, files []string) (*java.Package, error) {
-				return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
-			})
-			if err != nil {
-				log.Fatal().Err(err).Msg("cycle planning failed")
+		// Decide for this directory only
+		if err := l.cyclePlanner.EnsureCycleDecisionForDir(context.Background(), args.Rel, func(ctx context.Context, rel string, files []string) (*java.Package, error) {
+			return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
+		}); err != nil {
+			log.Warn().Err(err).Msg("cycle decision warning; proceeding")
+		}
+		// If this is a parent dir with no java files, proactively trigger decisions for immediate children
+		if len(args.RegularFiles) == 0 && !l.cyclePlanner.IsLCA(args.Rel) {
+			abs := filepath.Join(args.Config.RepoRoot, args.Rel)
+			if entries, err := os.ReadDir(abs); err == nil {
+				for _, e := range entries {
+					if !e.IsDir() {
+						continue
+					}
+					childRel := filepath.ToSlash(filepath.Join(args.Rel, e.Name()))
+					if err := l.cyclePlanner.EnsureCycleDecisionForDir(context.Background(), childRel, func(ctx context.Context, rel string, files []string) (*java.Package, error) {
+						return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
+					}); err != nil {
+						log.Debug().Err(err).Str("child", childRel).Msg("child cycle decision warning; proceeding")
+					}
+				}
 			}
 		}
 		// If this directory is a suppressed participant, handle existing BUILD and return empty
