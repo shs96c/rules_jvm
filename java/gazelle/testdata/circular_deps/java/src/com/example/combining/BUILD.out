@@ -3,8 +3,9 @@ load("@rules_java//java:defs.bzl", "java_library")
 java_library(
     name = "combining",
     srcs = ["Combining.java"],
+    visibility = ["//:__subpackages__"],
     deps = [
-        "//java/src/example",
-        "//java/src/example/dep/nodep",
+        "//java/src/com/example",
+        "//java/src/com/example/dep/nodep",
     ],
 )

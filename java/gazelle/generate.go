@@ -95,8 +95,11 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	javaFilenamesRelativeToPackage := filterStrSlice(args.RegularFiles, func(f string) bool { return filepath.Ext(f) == ".java" })
 
 	if len(javaFilenamesRelativeToPackage) == 0 {
-		if !isModule || !cfg.IsModuleRoot() {
-			return res
+		// In package mode, we may still need to generate a combined target at this directory if it's an LCA.
+		if !(!isModule && l.cyclePlanner != nil && l.cyclePlanner.IsLCA(args.Rel)) {
+			if !isModule || !cfg.IsModuleRoot() {
+				return res
+			}
 		}
 	}
 
