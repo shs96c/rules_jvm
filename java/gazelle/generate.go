@@ -17,7 +17,6 @@ import (
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
-
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	bzl "github.com/bazelbuild/buildtools/build"
@@ -58,36 +57,52 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	}
 
 	isModule := cfg.ModuleGranularity() == "module"
-
-	// Lazy cycle planning for package mode
+	// Lazy cycle planner: decide consolidation per directory (package mode only)
 	if !isModule {
 		if l.cyclePlanner == nil {
 			l.cyclePlanner = cycles.NewPlanner(args.Config.RepoRoot)
 		}
-		// Decide for this directory only
 		if err := l.cyclePlanner.EnsureCycleDecisionForDir(context.Background(), args.Rel, func(ctx context.Context, rel string, files []string) (*java.Package, error) {
 			return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
 		}); err != nil {
 			log.Warn().Err(err).Msg("cycle decision warning; proceeding")
 		}
-		// If this is a parent dir with no java files, proactively trigger decisions for immediate children
-		if len(args.RegularFiles) == 0 && !l.cyclePlanner.IsLCA(args.Rel) {
+		// If no java files in this dir, seed immediate children and grandchildren under standard Java roots
+		hasJava := false
+		for _, f := range args.RegularFiles {
+			if filepath.Ext(f) == ".java" {
+				hasJava = true
+				break
+			}
+		}
+		if !hasJava {
+			seedDirs := make([]string, 0)
 			abs := filepath.Join(args.Config.RepoRoot, args.Rel)
 			if entries, err := os.ReadDir(abs); err == nil {
 				for _, e := range entries {
-					if !e.IsDir() {
-						continue
-					}
-					childRel := filepath.ToSlash(filepath.Join(args.Rel, e.Name()))
-					if err := l.cyclePlanner.EnsureCycleDecisionForDir(context.Background(), childRel, func(ctx context.Context, rel string, files []string) (*java.Package, error) {
-						return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
-					}); err != nil {
-						log.Debug().Err(err).Str("child", childRel).Msg("child cycle decision warning; proceeding")
+					if e.IsDir() {
+						child := filepath.ToSlash(filepath.Join(args.Rel, e.Name()))
+						seedDirs = append(seedDirs, child)
+						// go one deeper for common java roots
+						if strings.HasSuffix(child, "/src") || strings.HasSuffix(child, "/java") || strings.Contains(child, "/javatests") || strings.Contains(child, "/test/java") || strings.HasSuffix(child, "/java/src") {
+							childAbs := filepath.Join(args.Config.RepoRoot, child)
+							if ents2, err2 := os.ReadDir(childAbs); err2 == nil {
+								for _, e2 := range ents2 {
+									if e2.IsDir() {
+										seedDirs = append(seedDirs, filepath.ToSlash(filepath.Join(child, e2.Name())))
+									}
+								}
+							}
+						}
 					}
 				}
 			}
+			for _, d := range seedDirs {
+				_ = l.cyclePlanner.EnsureCycleDecisionForDir(context.Background(), d, func(ctx context.Context, rel string, files []string) (*java.Package, error) {
+					return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
+				})
+			}
 		}
-		// If this directory is a suppressed participant, handle existing BUILD and return empty
 		if l.cyclePlanner.IsSuppressed(args.Rel) {
 			if args.File != nil && len(args.File.Rules) > 0 {
 				if cfg.DeleteCycleBuildFiles() {
@@ -113,24 +128,42 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	// Check if we're in a subdirectory of a resources root
 	isResourcesSubdir := strings.Contains(args.Rel, "/resources/") && !isResourcesRoot
 
+	// If this directory is the LCA of a detected cycle group in package mode, synthesize
+	// a combined java_library even if there are no local Java sources.
+	if !isModule && l.cyclePlanner != nil && l.cyclePlanner.IsLCA(args.Rel) {
+		gp := l.cyclePlanner.GroupForLCA(args.Rel)
+		libKind := "java_library"
+		if kindMap, ok := args.Config.KindMap["java_library"]; ok {
+			libKind = kindMap.KindName
+		}
+		annotationProcessorClasses := sorted_set.NewSortedSetFn(nil, types.ClassNameLess)
+		l.generateJavaLibrary(
+			args.File,
+			args.Rel,
+			filepath.Base(args.Rel),
+			gp.Srcs,
+			"",
+			"",
+			gp.Packages,
+			gp.Imports,
+			gp.Exports,
+			annotationProcessorClasses,
+			false,
+			libKind,
+			&res,
+			cfg,
+			args.Config.RepoName,
+		)
+		return res
+	}
+
 	var javaPkg *java.Package
 
 	if len(javaFilenamesRelativeToPackage) == 0 {
-<<<<<<< HEAD
-		// In package mode, we may still need to generate a combined target at this directory if it's an LCA.
-		if !(!isModule && l.cyclePlanner != nil && l.cyclePlanner.IsLCA(args.Rel)) {
-			if !isModule || !cfg.IsModuleRoot() {
-				return res
-			}
-||||||| b032e6d
-		if !isModule || !cfg.IsModuleRoot() {
-			return res
-=======
 		// If no Java files, check if we should still process this directory
 		if isResourcesSubdir {
 			// Skip subdirectories of resources roots - they shouldn't generate BUILD files
 			return res
->>>>>>> sourcesets
 		}
 		if !isResourcesRoot {
 			// Not a resources root directory, apply normal logic
@@ -279,45 +312,6 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		javaLibraryKind = kindMap.KindName
 	}
 
-<<<<<<< HEAD
-	// If this dir is an LCA for a cycle group, override sources/packages with the planned aggregation
-	if !isModule && l.cyclePlanner.IsLCA(args.Rel) {
-		g := l.cyclePlanner.GroupForLCA(args.Rel)
-		// Ensure packages includes all planned packages
-		for _, p := range g.Packages.SortedSlice() {
-			allPackageNames.Add(p)
-		}
-		// Replace production files with all group srcs (prod + test; tests will still get rules)
-		productionJavaFiles = sorted_set.NewSortedSet([]string{})
-		for _, s := range g.Srcs {
-			productionJavaFiles.Add(s)
-		}
-		// Imports/exports: use planned, already filtered to exclude intra-group
-		productionJavaImports = g.Imports.Clone()
-		nonLocalJavaExports = g.Exports.Clone()
-
-		// Recompute non-local production imports now that we've overridden imports and packages
-		allPackageNamesSlice = allPackageNames.SortedSlice()
-		nonLocalProductionJavaImports = productionJavaImports.Filter(func(i types.PackageName) bool {
-			for _, n := range allPackageNamesSlice {
-				if i.Name == n.Name {
-					return false
-				}
-			}
-			return true
-		})
-	}
-
-	if productionJavaFiles.Len() > 0 {
-		targetName := filepath.Base(args.Rel)
-		if args.Rel == "" && !isModule && l.cyclePlanner != nil && l.cyclePlanner.IsLCA(args.Rel) {
-			targetName = "workspace"
-		}
-		l.generateJavaLibrary(args.File, args.Rel, targetName, productionJavaFiles.SortedSlice(), allPackageNames, nonLocalProductionJavaImports, nonLocalJavaExports, annotationProcessorClasses, false, javaLibraryKind, &res, cfg, args.Config.RepoName)
-||||||| b032e6d
-	if productionJavaFiles.Len() > 0 {
-		l.generateJavaLibrary(args.File, args.Rel, filepath.Base(args.Rel), productionJavaFiles.SortedSlice(), allPackageNames, nonLocalProductionJavaImports, nonLocalJavaExports, annotationProcessorClasses, false, javaLibraryKind, &res, cfg, args.Config.RepoName)
-=======
 	// Check if this is a resources root directory and generate a pkg_files target
 	if isResourcesRoot && len(javaFilenamesRelativeToPackage) == 0 {
 		// Collect resource files recursively from this directory and all subdirectories
@@ -415,7 +409,6 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		}
 
 		l.generateJavaLibrary(args.File, args.Rel, filepath.Base(args.Rel), productionJavaFiles.SortedSlice(), resourcesDirectRef, resourcesRuntimeDep, allPackageNames, nonLocalProductionJavaImports, nonLocalJavaExports, annotationProcessorClasses, false, javaLibraryKind, &res, cfg, args.Config.RepoName)
->>>>>>> sourcesets
 	}
 
 	var testHelperJavaClasses *sorted_set.SortedSet[types.ClassName]

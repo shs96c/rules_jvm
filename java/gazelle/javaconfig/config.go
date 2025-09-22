@@ -59,24 +59,23 @@ const (
 	// This allows monorepos to closely match a traditional Gradle/Maven model where subprojects are published in jars.
 	// Can be either "true" or "false". Defaults to "true".
 	// Inherited by children packages, can only be set at the root of the repository.
-    JavaResolveToJavaExports = "java_resolve_to_java_exports"
+	JavaResolveToJavaExports = "java_resolve_to_java_exports"
 
-    // JavaDeleteCycleBuildFiles controls whether Gazelle should delete existing BUILD files
-    // inside directories that participate in a detected Java cycle (non-LCA participants).
-    // Can be either "true" or "false". Defaults to "false".
-    // This applies only in package mode cycle consolidation.
-    JavaDeleteCycleBuildFiles = "java_delete_cycle_build_files"
+	// JavaDeleteCycleBuildFiles controls whether Gazelle should delete existing BUILD files
+	// inside directories that participate in a detected Java cycle (non-LCA participants).
+	// Can be either "true" or "false". Defaults to "false".
+	// This applies only in package mode cycle consolidation.
+	JavaDeleteCycleBuildFiles = "java_delete_cycle_build_files"
 
-    // JavaSourcesetRoot explicitly marks a directory as the root of a sourceset.
-    // This provides a clear override to the auto-detection algorithm.
-    // Example: # gazelle:java_sourceset_root my/custom/src
-    JavaSourcesetRoot = "java_sourceset_root"
+	// JavaSourcesetRoot explicitly marks a directory as the root of a sourceset.
+	// This provides a clear override to the auto-detection algorithm.
+	// Example: # gazelle:java_sourceset_root my/custom/src
+	JavaSourcesetRoot = "java_sourceset_root"
 
-    // JavaStripResourcesPrefix overrides the path-stripping behavior for resources.
-    // This is a direct way to specify the resource_strip_prefix for all resources in a directory.
-    // Example: # gazelle:java_strip_resources_prefix my/data/config
-    JavaStripResourcesPrefix = "java_strip_resources_prefix"
-)
+	// JavaStripResourcesPrefix overrides the path-stripping behavior for resources.
+	// This is a direct way to specify the resource_strip_prefix for all resources in a directory.
+	// Example: # gazelle:java_strip_resources_prefix my/data/config
+	JavaStripResourcesPrefix = "java_strip_resources_prefix"
 )
 
 // Configs is an extension of map[string]*Config. It provides finding methods
@@ -135,16 +134,16 @@ type Config struct {
 	mavenInstallFile                                   string
 	moduleGranularity                                  string
 	repoRoot                                           string
-    testMode                                           string
-    deleteCycleBuildFiles                              bool
-    customTestFileSuffixes                             *[]string
-    excludedArtifacts                                  map[string]struct{}
-    annotationToAttribute                              map[string]map[string]bzl.Expr
-    annotationToWrapper                                map[string]string
-    mavenRepositoryName                                string
-    annotationProcessorFullQualifiedClassToPluginClass map[string]*sorted_set.SortedSet[types.ClassName]
-    sourcesetRoot                                      string
-    stripResourcesPrefix                               string
+	testMode                                           string
+	deleteCycleBuildFiles                              bool
+	customTestFileSuffixes                             *[]string
+	excludedArtifacts                                  map[string]struct{}
+	annotationToAttribute                              map[string]map[string]bzl.Expr
+	annotationToWrapper                                map[string]string
+	mavenRepositoryName                                string
+	annotationProcessorFullQualifiedClassToPluginClass map[string]*sorted_set.SortedSet[types.ClassName]
+	sourcesetRoot                                      string
+	stripResourcesPrefix                               string
 }
 
 type LoadInfo struct {
@@ -162,17 +161,17 @@ func New(repoRoot string) *Config {
 		mavenInstallFile:       "maven_install.json",
 		moduleGranularity:      "package",
 		repoRoot:               repoRoot,
-        testMode:               "suite",
-        deleteCycleBuildFiles:  false,
-        customTestFileSuffixes: nil,
-        excludedArtifacts:      make(map[string]struct{}),
-        annotationToAttribute:  make(map[string]map[string]bzl.Expr),
-        annotationToWrapper:    make(map[string]string),
-        mavenRepositoryName:    "maven",
-        annotationProcessorFullQualifiedClassToPluginClass: make(map[string]*sorted_set.SortedSet[types.ClassName]),
-        sourcesetRoot:        "",
-        stripResourcesPrefix: "",
-    }
+		testMode:               "suite",
+		deleteCycleBuildFiles:  false,
+		customTestFileSuffixes: nil,
+		excludedArtifacts:      make(map[string]struct{}),
+		annotationToAttribute:  make(map[string]map[string]bzl.Expr),
+		annotationToWrapper:    make(map[string]string),
+		mavenRepositoryName:    "maven",
+		annotationProcessorFullQualifiedClassToPluginClass: make(map[string]*sorted_set.SortedSet[types.ClassName]),
+		sourcesetRoot:        "",
+		stripResourcesPrefix: "",
+	}
 }
 
 // ExtensionEnabled returns whether the extension is enabled or not.
@@ -341,15 +340,15 @@ func (c *Config) SetResolveToJavaExports(resolve bool) {
 }
 
 func (c *Config) SetDeleteCycleBuildFiles(v bool) {
-    c.deleteCycleBuildFiles = v
+	c.deleteCycleBuildFiles = v
 }
 
 func (c *Config) DeleteCycleBuildFiles() bool {
-    return c.deleteCycleBuildFiles
+	return c.deleteCycleBuildFiles
 }
 
 func (c *Config) SourcesetRoot() string {
-    return c.sourcesetRoot
+	return c.sourcesetRoot
 }
 
 func (c *Config) SetSourcesetRoot(root string) {
@@ -361,7 +360,7 @@ func (c *Config) StripResourcesPrefix() string {
 }
 
 func (c *Config) SetStripResourcesPrefix(prefix string) {
-    c.stripResourcesPrefix = prefix
+	c.stripResourcesPrefix = prefix
 }
 func equalStringSlices(l, r []string) bool {
 	if len(l) != len(r) {
