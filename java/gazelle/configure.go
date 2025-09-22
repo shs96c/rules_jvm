@@ -67,6 +67,7 @@ func (jc *Configurer) KnownDirectives() []string {
 		javaconfig.JavaMavenRepositoryName,
 		javaconfig.JavaAnnotationProcessorPlugin,
 		javaconfig.JavaResolveToJavaExports,
+		javaconfig.JavaDeleteCycleBuildFiles,
 	}
 }
 
@@ -167,6 +168,16 @@ func (jc *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 				default:
 					jc.lang.logger.Fatal().Msgf("invalid value for directive %q: %s: possible values are true/false",
 						javaconfig.JavaResolveToJavaExports, d.Value)
+				}
+			case javaconfig.JavaDeleteCycleBuildFiles:
+				switch d.Value {
+				case "true":
+					cfg.SetDeleteCycleBuildFiles(true)
+				case "false":
+					cfg.SetDeleteCycleBuildFiles(false)
+				default:
+					jc.lang.logger.Fatal().Msgf("invalid value for directive %q: %s: possible values are true/false",
+						javaconfig.JavaDeleteCycleBuildFiles, d.Value)
 				}
 			}
 

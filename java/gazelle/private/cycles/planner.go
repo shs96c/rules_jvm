@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/javaparser"
+	jpkg "github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 )
@@ -44,6 +44,8 @@ type GroupPlan struct {
 	Members  map[string]struct{}
 	Srcs     []string
 	Packages *sorted_set.SortedSet[types.PackageName]
+	Imports  *sorted_set.SortedSet[types.PackageName]
+	Exports  *sorted_set.SortedSet[types.PackageName]
 }
 
 // Planner builds a one-time plan for cycle consolidation for package mode.
@@ -95,7 +97,7 @@ func (p *Planner) GroupForLCA(rel string) *GroupPlan { return p.lcaToGroup[rel] 
 
 // Plan performs a one-time repository scan and computes cycle groups and their LCAs.
 // parse is a function that, given a rel dir and basenames, returns a parsed java package.
-func (p *Planner) Plan(ctx context.Context, parse func(ctx context.Context, rel string, files []string) (*javaparser.ParsePackageResponse, error)) error {
+func (p *Planner) Plan(ctx context.Context, parse func(ctx context.Context, rel string, files []string) (*jpkg.Package, error)) error {
 	if p.planned {
 		return nil
 	}
@@ -226,7 +228,7 @@ func (p *Planner) Plan(ctx context.Context, parse func(ctx context.Context, rel 
 		}
 	}
 
-	// 7) Populate srcs and maps
+	// 7) Populate srcs and imports/exports and maps
 	for _, g := range groups {
 		// include sources from members + LCA itself
 		members := make(map[string]struct{}, len(g.Members))
@@ -236,15 +238,38 @@ func (p *Planner) Plan(ctx context.Context, parse func(ctx context.Context, rel 
 		members[g.LCA] = struct{}{}
 
 		var srcs []string
+		groupImports := sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
+		groupExports := sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
 		for m := range members {
 			if info, ok := p.dirs[m]; ok {
 				for _, f := range info.Files {
 					srcs = append(srcs, filepath.ToSlash(filepath.Join(m, f)))
 				}
+				groupImports.AddAll(info.ImportedPkgs)
+				groupExports.AddAll(info.ExportedPkgs)
+				if info.PkgName.Name != "" {
+					g.Packages.Add(info.PkgName)
+				}
 			}
 		}
 		sort.Strings(srcs)
 		g.Srcs = srcs
+
+		// Filter out intra-group packages from imports/exports
+		filtered := sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
+		for _, imp := range groupImports.SortedSlice() {
+			if !g.Packages.Contains(imp) {
+				filtered.Add(imp)
+			}
+		}
+		g.Imports = filtered
+		filtered = sorted_set.NewSortedSetFn[types.PackageName](nil, types.PackageNameLess)
+		for _, exp := range groupExports.SortedSlice() {
+			if !g.Packages.Contains(exp) {
+				filtered.Add(exp)
+			}
+		}
+		g.Exports = filtered
 	}
 
 	// 8) Index groups for lookup
@@ -313,6 +338,11 @@ func stronglyConnectedComponents(graph map[string]map[string]bool) [][]string {
 	}
 
 	return sccs
+}
+
+// DirInfo returns the collected information for a directory, if any.
+func (p *Planner) DirInfo(rel string) *DirInfo {
+	return p.dirs[rel]
 }
 
 func splitPath(rel string) []string {

@@ -60,6 +60,12 @@ const (
 	// Can be either "true" or "false". Defaults to "true".
 	// Inherited by children packages, can only be set at the root of the repository.
 	JavaResolveToJavaExports = "java_resolve_to_java_exports"
+
+	// JavaDeleteCycleBuildFiles controls whether Gazelle should delete existing BUILD files
+	// inside directories that participate in a detected Java cycle (non-LCA participants).
+	// Can be either "true" or "false". Defaults to "false".
+	// This applies only in package mode cycle consolidation.
+	JavaDeleteCycleBuildFiles = "java_delete_cycle_build_files"
 )
 
 // Configs is an extension of map[string]*Config. It provides finding methods
@@ -87,6 +93,7 @@ func (c *Config) NewChild() *Config {
 		moduleGranularity:      c.moduleGranularity,
 		repoRoot:               c.repoRoot,
 		testMode:               c.testMode,
+		deleteCycleBuildFiles:  c.deleteCycleBuildFiles,
 		customTestFileSuffixes: c.customTestFileSuffixes,
 		annotationToAttribute:  c.annotationToAttribute,
 		annotationToWrapper:    c.annotationToWrapper,
@@ -118,6 +125,7 @@ type Config struct {
 	moduleGranularity                                  string
 	repoRoot                                           string
 	testMode                                           string
+	deleteCycleBuildFiles                              bool
 	customTestFileSuffixes                             *[]string
 	excludedArtifacts                                  map[string]struct{}
 	annotationToAttribute                              map[string]map[string]bzl.Expr
@@ -142,6 +150,7 @@ func New(repoRoot string) *Config {
 		moduleGranularity:      "package",
 		repoRoot:               repoRoot,
 		testMode:               "suite",
+		deleteCycleBuildFiles:  false,
 		customTestFileSuffixes: nil,
 		excludedArtifacts:      make(map[string]struct{}),
 		annotationToAttribute:  make(map[string]map[string]bzl.Expr),
@@ -314,6 +323,14 @@ func (c *Config) CanSetResolveToJavaExports() bool {
 
 func (c *Config) SetResolveToJavaExports(resolve bool) {
 	c.resolveToJavaExports.Initialize(resolve)
+}
+
+func (c *Config) SetDeleteCycleBuildFiles(v bool) {
+	c.deleteCycleBuildFiles = v
+}
+
+func (c *Config) DeleteCycleBuildFiles() bool {
+	return c.deleteCycleBuildFiles
 }
 
 func equalStringSlices(l, r []string) bool {

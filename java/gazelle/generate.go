@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/cycles"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/javaparser"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/maven"
@@ -16,6 +17,7 @@ import (
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
+
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 	bzl "github.com/bazelbuild/buildtools/build"
@@ -56,6 +58,35 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	}
 
 	isModule := cfg.ModuleGranularity() == "module"
+
+	// One-time cycle planning for package mode
+	if !isModule {
+		if l.cyclePlanner == nil {
+			l.cyclePlanner = cycles.NewPlanner(args.Config.RepoRoot)
+		}
+		if !l.cyclePlanner.IsPlanned() {
+			// Plan using the existing parser
+			err := l.cyclePlanner.Plan(context.Background(), func(ctx context.Context, rel string, files []string) (*java.Package, error) {
+				return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
+			})
+			if err != nil {
+				log.Fatal().Err(err).Msg("cycle planning failed")
+			}
+		}
+		// If this directory is a suppressed participant, handle existing BUILD and return empty
+		if l.cyclePlanner.IsSuppressed(args.Rel) {
+			if args.File != nil && len(args.File.Rules) > 0 {
+				if cfg.DeleteCycleBuildFiles() {
+					if err := os.RemoveAll(args.File.Path); err != nil {
+						log.Fatal().Err(err).Str("path", args.File.Path).Msg("failed to delete conflicting BUILD file in cycle participant")
+					}
+				} else {
+					log.Fatal().Msg("Detected Java package cycle. Existing BUILD file in participant directory prevents consolidation. Enable # gazelle:java_delete_cycle_build_files true to auto-delete.")
+				}
+			}
+			return language.GenerateResult{}
+		}
+	}
 
 	if cfg.GenerateProto() {
 		generateProtoLibraries(args, log, &res)
@@ -199,8 +230,40 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		javaLibraryKind = kindMap.KindName
 	}
 
+	// If this dir is an LCA for a cycle group, override sources/packages with the planned aggregation
+	if !isModule && l.cyclePlanner.IsLCA(args.Rel) {
+		g := l.cyclePlanner.GroupForLCA(args.Rel)
+		// Ensure packages includes all planned packages
+		for _, p := range g.Packages.SortedSlice() {
+			allPackageNames.Add(p)
+		}
+		// Replace production files with all group srcs (prod + test; tests will still get rules)
+		productionJavaFiles = sorted_set.NewSortedSet([]string{})
+		for _, s := range g.Srcs {
+			productionJavaFiles.Add(s)
+		}
+		// Imports/exports: use planned, already filtered to exclude intra-group
+		productionJavaImports = g.Imports.Clone()
+		nonLocalJavaExports = g.Exports.Clone()
+
+		// Recompute non-local production imports now that we've overridden imports and packages
+		allPackageNamesSlice = allPackageNames.SortedSlice()
+		nonLocalProductionJavaImports = productionJavaImports.Filter(func(i types.PackageName) bool {
+			for _, n := range allPackageNamesSlice {
+				if i.Name == n.Name {
+					return false
+				}
+			}
+			return true
+		})
+	}
+
 	if productionJavaFiles.Len() > 0 {
-		l.generateJavaLibrary(args.File, args.Rel, filepath.Base(args.Rel), productionJavaFiles.SortedSlice(), allPackageNames, nonLocalProductionJavaImports, nonLocalJavaExports, annotationProcessorClasses, false, javaLibraryKind, &res, cfg, args.Config.RepoName)
+		targetName := filepath.Base(args.Rel)
+		if args.Rel == "" && !isModule && l.cyclePlanner != nil && l.cyclePlanner.IsLCA(args.Rel) {
+			targetName = "workspace"
+		}
+		l.generateJavaLibrary(args.File, args.Rel, targetName, productionJavaFiles.SortedSlice(), allPackageNames, nonLocalProductionJavaImports, nonLocalJavaExports, annotationProcessorClasses, false, javaLibraryKind, &res, cfg, args.Config.RepoName)
 	}
 
 	var testHelperJavaClasses *sorted_set.SortedSet[types.ClassName]

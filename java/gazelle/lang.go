@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/cycles"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java_export_index"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/javaparser"
@@ -30,12 +31,11 @@ type javaLang struct {
 	mavenResolver maven.Resolver
 
 	// javaPackageCache is used for module granularity support
+	// Key is the path to the java package from the Bazel workspace root.
+	javaPackageCache map[string]*java.Package
 
 	// cyclePlanner plans consolidation for directory cycles in package mode
 	cyclePlanner *cycles.Planner
-
-	// Key is the path to the java package from the Bazel workspace root.
-	javaPackageCache map[string]*java.Package
 
 	// javaExportIndex holds information about java_export targets and which symbols they make available.
 	javaExportIndex *java_export_index.JavaExportIndex
