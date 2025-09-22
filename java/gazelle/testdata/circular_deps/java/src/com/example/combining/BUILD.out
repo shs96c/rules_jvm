@@ -1,0 +1,10 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "combining",
+    srcs = ["Combining.java"],
+    deps = [
+        "//java/src/example",
+        "//java/src/example/dep/nodep",
+    ],
+)
