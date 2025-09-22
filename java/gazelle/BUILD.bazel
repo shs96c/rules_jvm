@@ -20,6 +20,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//java/gazelle/javaconfig",
+        "//java/gazelle/private/cycles",
         "//java/gazelle/private/java",
         "//java/gazelle/private/java_export_index",
         "//java/gazelle/private/javaparser",
@@ -28,8 +29,6 @@ go_library(
         "//java/gazelle/private/maven",
         "//java/gazelle/private/sorted_multiset",
         "//java/gazelle/private/sorted_set",
-        "//java/gazelle/private/cycles",
-
         "//java/gazelle/private/types",
         "@bazel_gazelle//config",
         "@bazel_gazelle//label",
@@ -56,7 +55,6 @@ go_test(
     embed = [":gazelle"],
     deps = [
         "//java/gazelle/javaconfig",
-        "//java/gazelle/private/java",
         "//java/gazelle/private/sorted_set",
         "//java/gazelle/private/types",
         "@bazel_gazelle//config",
