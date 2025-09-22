@@ -61,6 +61,12 @@ const (
 	// Inherited by children packages, can only be set at the root of the repository.
 	JavaResolveToJavaExports = "java_resolve_to_java_exports"
 
+	// JavaDeleteCycleBuildFiles controls whether Gazelle should delete existing BUILD files
+	// inside directories that participate in a detected Java cycle (non-LCA participants).
+	// Can be either "true" or "false". Defaults to "false".
+	// This applies only in package mode cycle consolidation.
+	JavaDeleteCycleBuildFiles = "java_delete_cycle_build_files"
+
 	// JavaSourcesetRoot explicitly marks a directory as the root of a sourceset.
 	// This provides a clear override to the auto-detection algorithm.
 	// Example: # gazelle:java_sourceset_root my/custom/src
@@ -103,6 +109,7 @@ func (c *Config) NewChild() *Config {
 		moduleGranularity:      c.moduleGranularity,
 		repoRoot:               c.repoRoot,
 		testMode:               c.testMode,
+		deleteCycleBuildFiles:  c.deleteCycleBuildFiles,
 		customTestFileSuffixes: c.customTestFileSuffixes,
 		annotationToAttribute:  c.annotationToAttribute,
 		annotationToWrapper:    c.annotationToWrapper,
@@ -135,6 +142,7 @@ type Config struct {
 	moduleGranularity                                  string
 	repoRoot                                           string
 	testMode                                           string
+	deleteCycleBuildFiles                              bool
 	customTestFileSuffixes                             *[]string
 	excludedArtifacts                                  map[string]struct{}
 	annotationToAttribute                              map[string]map[string]bzl.Expr
@@ -162,6 +170,7 @@ func New(repoRoot string) *Config {
 		moduleGranularity:      "package",
 		repoRoot:               repoRoot,
 		testMode:               "suite",
+		deleteCycleBuildFiles:  false,
 		customTestFileSuffixes: nil,
 		excludedArtifacts:      make(map[string]struct{}),
 		annotationToAttribute:  make(map[string]map[string]bzl.Expr),
@@ -346,6 +355,14 @@ func (c *Config) SetResolveToJavaExports(resolve bool) {
 	c.resolveToJavaExports.Initialize(resolve)
 }
 
+func (c *Config) SetDeleteCycleBuildFiles(v bool) {
+	c.deleteCycleBuildFiles = v
+}
+
+func (c *Config) DeleteCycleBuildFiles() bool {
+	return c.deleteCycleBuildFiles
+}
+
 func (c *Config) SourcesetRoot() string {
 	return c.sourcesetRoot
 }
@@ -361,7 +378,6 @@ func (c *Config) StripResourcesPrefix() string {
 func (c *Config) SetStripResourcesPrefix(prefix string) {
 	c.stripResourcesPrefix = prefix
 }
-
 func equalStringSlices(l, r []string) bool {
 	if len(l) != len(r) {
 		return false

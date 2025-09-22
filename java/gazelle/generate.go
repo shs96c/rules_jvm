@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/cycles"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/javaparser"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/maven"
@@ -44,7 +45,7 @@ type separateJavaTestReasons struct {
 // GenerateRules extracts build metadata from source files in a directory.
 //
 // See language.GenerateRules for more information.
-func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
+func (l *javaLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
 	log := l.logger.With().Str("step", "GenerateRules").Str("rel", args.Rel).Logger()
 
 	cfgs := args.Config.Exts[languageName].(javaconfig.Configs)
@@ -55,6 +56,103 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		return res
 	}
 
+	isModule := cfg.ModuleGranularity() == "module"
+	// Lazy cycle planner: decide consolidation per directory (package mode only)
+	if !isModule {
+		if l.cyclePlanner == nil {
+			l.cyclePlanner = cycles.NewPlanner(args.Config.RepoRoot)
+		}
+
+		// Always do cycle detection and seeding first, before checking if this is an LCA
+		// Only call EnsureCycleDecisionForDir if this directory is not already an LCA
+		// This prevents overwriting existing cycle decisions
+		if !l.cyclePlanner.IsLCA(args.Rel) {
+			if err := l.cyclePlanner.EnsureCycleDecisionForDir(context.Background(), args.Rel, func(ctx context.Context, rel string, files []string) (*java.Package, error) {
+				return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
+			}); err != nil {
+				log.Warn().Err(err).Msg("cycle decision warning; proceeding")
+			}
+		}
+
+		// If no java files in this dir, seed immediate children and grandchildren under standard Java roots
+		// This seeding must happen before we check if this directory is an LCA
+		hasJava := false
+		for _, f := range args.RegularFiles {
+			if filepath.Ext(f) == ".java" {
+				hasJava = true
+				break
+			}
+		}
+		if !hasJava {
+			seedDirs := make([]string, 0)
+			abs := filepath.Join(args.Config.RepoRoot, args.Rel)
+			if entries, err := os.ReadDir(abs); err == nil {
+				for _, e := range entries {
+					if e.IsDir() {
+						child := filepath.ToSlash(filepath.Join(args.Rel, e.Name()))
+						seedDirs = append(seedDirs, child)
+						// go one deeper for common java roots
+						if strings.HasSuffix(child, "/src") || strings.HasSuffix(child, "/java") || strings.Contains(child, "/javatests") || strings.Contains(child, "/test/java") || strings.HasSuffix(child, "/java/src") {
+							childAbs := filepath.Join(args.Config.RepoRoot, child)
+							if ents2, err2 := os.ReadDir(childAbs); err2 == nil {
+								for _, e2 := range ents2 {
+									if e2.IsDir() {
+										grandchild := filepath.ToSlash(filepath.Join(child, e2.Name()))
+										seedDirs = append(seedDirs, grandchild)
+
+										// Check if this is a Maven sourceset root (src/<sourceset>/java)
+										if isMavenSourcesetRoot(grandchild) {
+											// Recursively scan the entire subtree for Java-containing directories
+											javaSubdirs := l.findAllJavaDirectories(args.Config.RepoRoot, grandchild)
+											seedDirs = append(seedDirs, javaSubdirs...)
+										}
+
+										// For /src directories, go one level deeper to find Maven sourceset patterns
+										if strings.HasSuffix(child, "/src") {
+											grandchildAbs := filepath.Join(args.Config.RepoRoot, grandchild)
+											if ents3, err3 := os.ReadDir(grandchildAbs); err3 == nil {
+												for _, e3 := range ents3 {
+													if e3.IsDir() {
+														greatgrandchild := filepath.ToSlash(filepath.Join(grandchild, e3.Name()))
+														seedDirs = append(seedDirs, greatgrandchild)
+
+														// Check if this is a Maven sourceset root (src/<sourceset>/java)
+														if isMavenSourcesetRoot(greatgrandchild) {
+															// Recursively scan the entire subtree for Java-containing directories
+															javaSubdirs := l.findAllJavaDirectories(args.Config.RepoRoot, greatgrandchild)
+															seedDirs = append(seedDirs, javaSubdirs...)
+														}
+													}
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			for _, d := range seedDirs {
+				_ = l.cyclePlanner.EnsureCycleDecisionForDir(context.Background(), d, func(ctx context.Context, rel string, files []string) (*java.Package, error) {
+					return l.parser.ParsePackage(ctx, &javaparser.ParsePackageRequest{Rel: rel, Files: files})
+				})
+			}
+		}
+
+		if l.cyclePlanner.IsSuppressed(args.Rel) {
+			if args.File != nil && len(args.File.Rules) > 0 {
+				if cfg.DeleteCycleBuildFiles() {
+					if err := os.RemoveAll(args.File.Path); err != nil {
+						log.Fatal().Err(err).Str("path", args.File.Path).Msg("failed to delete conflicting BUILD file in cycle participant")
+					}
+				} else {
+					log.Fatal().Msg("Detected Java package cycle. Existing BUILD file in participant directory prevents consolidation. Enable # gazelle:java_delete_cycle_build_files true to auto-delete.")
+				}
+			}
+			return language.GenerateResult{}
+		}
+	}
 	if cfg.GenerateProto() {
 		generateProtoLibraries(args, log, &res)
 	}
@@ -80,8 +178,35 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	// Check if we're in a subdirectory of a resources root
 	isResourcesSubdir := strings.Contains(args.Rel, "/resources/") && !isResourcesRoot
 
-	isModule := cfg.ModuleGranularity() == "module"
-
+	// If this directory is the LCA of a detected cycle group in package mode, synthesize
+	// a combined java_library even if there are no local Java sources.
+	if !isModule && l.cyclePlanner != nil && l.cyclePlanner.IsLCA(args.Rel) {
+		gp := l.cyclePlanner.GroupForLCA(args.Rel)
+		libKind := "java_library"
+		if kindMap, ok := args.Config.KindMap["java_library"]; ok {
+			libKind = kindMap.KindName
+		}
+		annotationProcessorClasses := sorted_set.NewSortedSetFn(nil, types.ClassNameLess)
+		l.generateJavaLibrary(
+			args.File,
+			args.Rel,
+			filepath.Base(args.Rel),
+			gp.Srcs,
+			"",
+			"",
+			gp.Packages,
+			gp.Imports,
+			gp.Exports,
+			annotationProcessorClasses,
+			false,
+			libKind,
+			&res,
+			cfg,
+			args.Config.RepoName,
+			[]types.ClassName{},
+		)
+		return res
+	}
 	var javaPkg *java.Package
 
 	if len(srcFilenamesRelativeToPackage) == 0 {
@@ -457,7 +582,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	return res
 }
 
-func (l javaLang) collectRuntimeDeps(kind, name string, file *rule.File) *sorted_set.SortedSet[label.Label] {
+func (l *javaLang) collectRuntimeDeps(kind, name string, file *rule.File) *sorted_set.SortedSet[label.Label] {
 	runtimeDeps := sorted_set.NewSortedSetFn([]label.Label{}, labelLess)
 	if file == nil {
 		return runtimeDeps
@@ -895,4 +1020,74 @@ func testHelperLibname(targetName string) string {
 
 func ptr[T any](v T) *T {
 	return &v
+}
+
+// isMavenSourcesetRoot checks if a directory path matches the Maven sourceset pattern: src/<sourceset>/java
+func isMavenSourcesetRoot(dirPath string) bool {
+	// Split the path and check if it matches src/<sourceset>/java pattern
+	parts := strings.Split(dirPath, "/")
+	if len(parts) < 3 {
+		return false
+	}
+
+	// Look for the pattern: .../src/<sourceset>/java
+	for i := 0; i <= len(parts)-3; i++ {
+		if parts[i] == "src" && parts[i+2] == "java" {
+			// Validate that the sourceset name is reasonable (not empty, not "java")
+			sourceset := parts[i+1]
+			if sourceset != "" && sourceset != "java" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findAllJavaDirectories recursively finds all directories under the given root that contain .java files
+func (l javaLang) findAllJavaDirectories(repoRoot, rootDir string) []string {
+	var javaDirectories []string
+
+	rootAbs := filepath.Join(repoRoot, rootDir)
+
+	err := filepath.WalkDir(rootAbs, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip hidden directories and common build directories
+		if d.IsDir() {
+			base := filepath.Base(path)
+			if strings.HasPrefix(base, ".") || base == "bazel-bin" || base == "bazel-out" || base == "bazel-testlogs" || base == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		// If this is a Java file, add its directory to the list
+		if filepath.Ext(path) == ".java" {
+			dir := filepath.Dir(path)
+			rel, err := filepath.Rel(repoRoot, dir)
+			if err != nil {
+				return nil // Skip on error
+			}
+			relSlash := filepath.ToSlash(rel)
+
+			// Add to list if not already present
+			for _, existing := range javaDirectories {
+				if existing == relSlash {
+					return nil // Already in list
+				}
+			}
+			javaDirectories = append(javaDirectories, relSlash)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		// Log error but don't fail - return what we found
+		l.logger.Warn().Err(err).Str("rootDir", rootDir).Msg("Error scanning for Java directories")
+	}
+
+	return javaDirectories
 }

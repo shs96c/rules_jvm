@@ -1,0 +1,11 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "overlapping",
+    srcs = [
+        "A.java",
+        "sub1/B.java",
+        "sub2/C.java",
+    ],
+    visibility = ["//:__subpackages__"],
+)

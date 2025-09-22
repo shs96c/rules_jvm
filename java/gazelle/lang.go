@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/cycles"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java_export_index"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/javaparser"
@@ -32,6 +33,9 @@ type javaLang struct {
 	// javaPackageCache is used for module granularity support
 	// Key is the path to the java package from the Bazel workspace root.
 	javaPackageCache map[string]*java.Package
+
+	// cyclePlanner plans consolidation for directory cycles in package mode
+	cyclePlanner *cycles.Planner
 
 	// javaExportIndex holds information about java_export targets and which symbols they make available.
 	javaExportIndex *java_export_index.JavaExportIndex
@@ -253,12 +257,15 @@ func (l javaLang) Fix(c *config.Config, f *rule.File) {
 func (l javaLang) DoneGeneratingRules() {
 	l.parser.ServerManager().Shutdown()
 	l.javaExportIndex.FinalizeIndex()
+	// Don't reset the cycle planner here - it needs to persist across directories
 }
 
 func (l javaLang) AfterResolvingDeps(_ context.Context) {
 	if l.hasHadErrors {
 		l.logger.Fatal().Msg("the java extension encountered errors that will create invalid build files")
 	}
+	// Reset the cycle planner after all processing is complete
+	l.cyclePlanner = nil
 }
 
 type shutdownServerOnFatalLogHook struct {

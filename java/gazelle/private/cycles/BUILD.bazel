@@ -1,0 +1,13 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cycles",
+    srcs = ["planner.go"],
+    importpath = "github.com/bazel-contrib/rules_jvm/java/gazelle/private/cycles",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//java/gazelle/private/java",
+        "//java/gazelle/private/sorted_set",
+        "//java/gazelle/private/types",
+    ],
+)
