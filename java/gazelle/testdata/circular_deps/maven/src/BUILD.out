@@ -1,0 +1,10 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "src",
+    srcs = [
+        "main/java/com/example/service/UserService.java",
+        "test/java/com/example/util/TestHelper.java",
+    ],
+    visibility = ["//:__subpackages__"],
+)
