@@ -28,6 +28,11 @@ buildifier(
 # gazelle:resolve java org.jetbrains.kotlin.config @contrib_rules_jvm_deps//:org_jetbrains_kotlin_kotlin_compiler
 # gazelle:resolve java org.jetbrains.kotlin.name @contrib_rules_jvm_deps//:org_jetbrains_kotlin_kotlin_compiler
 # gazelle:resolve java org.jetbrains.kotlin.psi @contrib_rules_jvm_deps//:org_jetbrains_kotlin_kotlin_compiler
+# gazelle:resolve java org.jetbrains.kotlin.lexer @contrib_rules_jvm_deps//:org_jetbrains_kotlin_kotlin_compiler
+# gazelle:resolve java com.intellij.openapi.util @contrib_rules_jvm_deps//:org_jetbrains_kotlin_kotlin_compiler
+# gazelle:resolve java com.intellij.openapi.vfs @contrib_rules_jvm_deps//:org_jetbrains_kotlin_kotlin_compiler
+# gazelle:resolve java com.intellij.psi @contrib_rules_jvm_deps//:org_jetbrains_kotlin_kotlin_compiler
+# gazelle:resolve java com.intellij.psi.tree @contrib_rules_jvm_deps//:org_jetbrains_kotlin_kotlin_compiler
 
 gazelle(
     name = "gazelle",
