@@ -236,12 +236,15 @@ func (l javaLang) Fix(c *config.Config, f *rule.File) {
 func (l javaLang) DoneGeneratingRules() {
 	l.parser.ServerManager().Shutdown()
 	l.javaExportIndex.FinalizeIndex()
+	// Don't reset the cycle planner here - it needs to persist across directories
 }
 
 func (l javaLang) AfterResolvingDeps(_ context.Context) {
 	if l.hasHadErrors {
 		l.logger.Fatal().Msg("the java extension encountered errors that will create invalid build files")
 	}
+	// Reset the cycle planner after all processing is complete
+	l.cyclePlanner = nil
 }
 
 type shutdownServerOnFatalLogHook struct {
