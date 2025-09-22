@@ -30,6 +30,10 @@ type javaLang struct {
 	mavenResolver maven.Resolver
 
 	// javaPackageCache is used for module granularity support
+
+	// cyclePlanner plans consolidation for directory cycles in package mode
+	cyclePlanner *cycles.Planner
+
 	// Key is the path to the java package from the Bazel workspace root.
 	javaPackageCache map[string]*java.Package
 
