@@ -8,6 +8,7 @@ import (
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/kotlin"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/maven"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
@@ -50,7 +51,7 @@ func (*Resolver) Name() string {
 func (jr *Resolver) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
 	log := jr.lang.logger.With().Str("step", "Imports").Str("rel", f.Pkg).Str("rule", r.Name()).Logger()
 
-	if !isJavaLibrary(r.Kind()) && r.Kind() != "java_test_suite" && r.Kind() != "java_export" {
+	if !isJvmLibrary(r.Kind()) && r.Kind() != "java_test_suite" && r.Kind() != "java_export" {
 		return nil
 	}
 
@@ -114,8 +115,16 @@ func (jr *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 		}
 	}
 
+	// Add implicit dependencies to exports (unified exports strategy)
+	allExportedPackageNames := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	allExportedPackageNames.AddAll(resolveInput.ExportedPackageNames)
+	// Add implicit dependencies from all Kotlin language features (inline functions, extension functions, property delegates, etc.)
+	for _, implicitDep := range resolveInput.ImplicitDeps {
+		allExportedPackageNames.Add(implicitDep.PackageName())
+	}
+
 	jr.populateAttr(c, packageConfig, r, "deps", resolveInput.ImportedPackageNames, ix, isTestRule, from, resolveInput.PackageNames)
-	jr.populateAttr(c, packageConfig, r, "exports", resolveInput.ExportedPackageNames, ix, isTestRule, from, resolveInput.PackageNames)
+	jr.populateAttr(c, packageConfig, r, "exports", allExportedPackageNames, ix, isTestRule, from, resolveInput.PackageNames)
 
 	jr.populatePluginsAttr(c, ix, resolveInput, packageConfig, from, isTestRule, r)
 }
@@ -258,6 +267,9 @@ func (jr *Resolver) resolveSinglePackage(c *config.Config, pc *javaconfig.Config
 	if java.IsStdlib(imp) {
 		return label.NoLabel
 	}
+	if kotlin.IsStdlib(imp) {
+		return label.NoLabel
+	}
 
 	// As per https://github.com/bazelbuild/bazel/blob/347407a88fd480fc5e0fbd42cc8196e4356a690b/tools/java/runfiles/Runfiles.java#L41
 	if imp.Name == "com.google.devtools.build.runfiles" {
@@ -383,8 +395,16 @@ func (jr *Resolver) tryResolvingToJavaExport(results []resolve.FindResult, from 
 	return nonJavaExportResults
 }
 
+func isJvmLibrary(kind string) bool {
+	return isJavaLibrary(kind) || isKotlinLibrary(kind)
+}
+
 func isJavaLibrary(kind string) bool {
 	return kind == "java_library" || isJavaProtoLibrary(kind)
+}
+
+func isKotlinLibrary(kind string) bool {
+	return kind == "kt_jvm_library"
 }
 
 func isJavaProtoLibrary(kind string) bool {

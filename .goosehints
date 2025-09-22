@@ -1,0 +1,1 @@
+You must NEVER create a build file (`BUILD` or `BUILD.bazel`) in any directory under `java/gazelle/testdata`. Doing so will cause tests to appear to pass when in reality they are not being run.
