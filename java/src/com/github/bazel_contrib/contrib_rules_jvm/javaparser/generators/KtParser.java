@@ -35,6 +35,7 @@ import org.jetbrains.kotlin.name.FqNamesUtilKt;
 import org.jetbrains.kotlin.name.Name;
 import org.jetbrains.kotlin.name.NameUtils;
 import org.jetbrains.kotlin.psi.KtAnnotated;
+import org.jetbrains.kotlin.psi.KtAnnotationEntry;
 import org.jetbrains.kotlin.psi.KtBinaryExpression;
 import org.jetbrains.kotlin.psi.KtCallExpression;
 import org.jetbrains.kotlin.psi.KtClass;
@@ -761,6 +762,69 @@ public class KtParser {
       }
 
       super.visitCallExpression(expression);
+    }
+
+    @Override
+    public void visitAnnotationEntry(KtAnnotationEntry annotationEntry) {
+      logger.debug("AST: Annotation entry: " + annotationEntry.getText());
+
+      try {
+        // Collect the annotation type itself
+        KtTypeReference typeReference = annotationEntry.getTypeReference();
+        if (typeReference != null) {
+          collectUsedType(typeReference);
+          logger.debug("AST: Collected annotation type: " + typeReference.getText());
+          
+          // Get the fully qualified annotation name
+          String annotationFqName = resolveTypeToFqName(typeReference);
+          if (annotationFqName != null) {
+            // Determine what element this annotation is on
+            KtElement annotatedElement = getAnnotatedElement(annotationEntry);
+          
+            if (annotatedElement instanceof KtClass || annotatedElement instanceof KtObjectDeclaration) {
+            // Class-level annotation
+            FqName classFqName = null;
+            if (annotatedElement instanceof KtClass) {
+              classFqName = ((KtClass) annotatedElement).getFqName();
+            } else {
+              classFqName = ((KtObjectDeclaration) annotatedElement).getFqName();
+            }
+            
+            if (classFqName != null) {
+              noteAnnotatedClass(classFqName.asString(), annotationFqName);
+              logger.debug("AST: Recorded class annotation: " + annotationFqName + " on " + classFqName);
+            }
+          } else if (annotatedElement instanceof KtNamedFunction) {
+            // Method-level annotation
+            KtNamedFunction function = (KtNamedFunction) annotatedElement;
+            FqName functionFqName = getFunctionFqName(function);
+            String functionName = function.getName();
+            
+            if (functionFqName != null && functionName != null && functionFqName.parent() != null) {
+              String classFqName = functionFqName.parent().asString();
+              noteAnnotatedMethod(classFqName, functionName, annotationFqName);
+              logger.debug("AST: Recorded method annotation: " + annotationFqName + " on " + functionFqName);
+            }
+          } else if (annotatedElement instanceof KtProperty) {
+            // Property/field-level annotation
+            KtProperty property = (KtProperty) annotatedElement;
+            FqName propertyFqName = getPropertyFqName(property);
+            String propertyName = property.getName();
+            
+            if (propertyFqName != null && propertyName != null && propertyFqName.parent() != null) {
+              String classFqName = propertyFqName.parent().asString();
+              noteAnnotatedField(classFqName, propertyName, annotationFqName);
+              logger.debug("AST: Recorded field annotation: " + annotationFqName + " on " + propertyFqName);
+            }
+          }
+        }
+        }
+      } catch (Exception e) {
+        logger.error("Error processing annotation: " + annotationEntry.getText(), e);
+      }
+
+      // The super call will visit all annotation arguments, including class literals
+      super.visitAnnotationEntry(annotationEntry);
     }
 
     @Override
@@ -1516,6 +1580,85 @@ public class KtParser {
 
     private void popVisibility() {
       visibilityStack.pop();
+    }
+
+    /**
+     * Helper method to get the annotated element (class, method, property) from an annotation entry
+     */
+    private KtElement getAnnotatedElement(KtAnnotationEntry annotationEntry) {
+      KtElement parent = (KtElement) annotationEntry.getParent();
+      
+      // Navigate up through modifierLists to find the actual annotated element
+      while (parent != null) {
+        if (parent instanceof KtClass 
+            || parent instanceof KtObjectDeclaration 
+            || parent instanceof KtNamedFunction 
+            || parent instanceof KtProperty) {
+          return parent;
+        }
+        parent = (KtElement) parent.getParent();
+      }
+      
+      return null;
+    }
+
+    /**
+     * Helper method to resolve a type reference to its fully qualified name
+     */
+    private String resolveTypeToFqName(KtTypeReference typeReference) {
+      String typeText = typeReference.getText();
+      
+      // First try to look it up in imports
+      if (fqImportByNameOrAlias.containsKey(typeText)) {
+        return fqImportByNameOrAlias.get(typeText).asString();
+      }
+      
+      // Check if it's already fully qualified
+      if (typeText.contains(".")) {
+        return typeText;
+      }
+      
+      // If not found, return the text as-is (might be in same package)
+      // TODO: Could enhance this to check the current package
+      return typeText;
+    }
+
+    private void noteAnnotatedClass(String annotatedFullyQualifiedClassName, String annotationFullyQualifiedClassName) {
+      if (!packageData.perClassData.containsKey(annotatedFullyQualifiedClassName)) {
+        packageData.perClassData.put(annotatedFullyQualifiedClassName, new PerClassData());
+      }
+      packageData.perClassData
+          .get(annotatedFullyQualifiedClassName)
+          .annotations
+          .add(annotationFullyQualifiedClassName);
+    }
+
+    private void noteAnnotatedMethod(
+        String annotatedFullyQualifiedClassName,
+        String methodName,
+        String annotationFullyQualifiedClassName) {
+      if (!packageData.perClassData.containsKey(annotatedFullyQualifiedClassName)) {
+        packageData.perClassData.put(annotatedFullyQualifiedClassName, new PerClassData());
+      }
+      PerClassData classData = packageData.perClassData.get(annotatedFullyQualifiedClassName);
+      if (!classData.perMethodAnnotations.containsKey(methodName)) {
+        classData.perMethodAnnotations.put(methodName, new TreeSet<>());
+      }
+      classData.perMethodAnnotations.get(methodName).add(annotationFullyQualifiedClassName);
+    }
+
+    private void noteAnnotatedField(
+        String annotatedFullyQualifiedClassName,
+        String fieldName,
+        String annotationFullyQualifiedClassName) {
+      if (!packageData.perClassData.containsKey(annotatedFullyQualifiedClassName)) {
+        packageData.perClassData.put(annotatedFullyQualifiedClassName, new PerClassData());
+      }
+      PerClassData classData = packageData.perClassData.get(annotatedFullyQualifiedClassName);
+      if (!classData.perFieldAnnotations.containsKey(fieldName)) {
+        classData.perFieldAnnotations.put(fieldName, new TreeSet<>());
+      }
+      classData.perFieldAnnotations.get(fieldName).add(annotationFullyQualifiedClassName);
     }
   }
 

@@ -1,0 +1,17 @@
+load("@rules_java//java:defs.bzl", "java_binary")
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
+
+kt_jvm_library(
+    name = "example",
+    srcs = ["Main.kt"],
+    plugins = ["@maven//:com_google_auto_value_auto_value__java_plugin__com_google_auto_value_processor_AutoValueProcessor"],
+    visibility = ["//:__subpackages__"],
+    deps = ["@maven//:com_google_auto_value_auto_value_annotations"],
+)
+
+java_binary(
+    name = "MainKt",
+    main_class = "com.example.MainKt",
+    visibility = ["//visibility:public"],
+    runtime_deps = [":example"],
+)

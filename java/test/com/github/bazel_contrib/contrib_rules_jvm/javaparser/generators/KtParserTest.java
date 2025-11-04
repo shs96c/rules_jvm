@@ -486,4 +486,92 @@ public class KtParserTest {
         data.usedTypes.contains("com.example.Processor"),
         "Should detect Processor class: " + data.usedTypes);
   }
+
+  @Test
+  public void detectsAnnotations() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("Annotations.kt"));
+
+    assertNotNull(data.usedTypes, "usedTypes should not be null");
+
+    // Should detect annotation types
+    assertTrue(
+        data.usedTypes.contains("com.example.annotations.Deprecated"),
+        "Should detect Deprecated annotation: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.annotations.Entity"),
+        "Should detect Entity annotation: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.annotations.Table"),
+        "Should detect Table annotation: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.serialization.JsonSerializable"),
+        "Should detect JsonSerializable annotation: " + data.usedTypes);
+
+    // Should detect class literals in annotation arguments
+    assertTrue(
+        data.usedTypes.contains("com.example.serializers.CustomSerializer"),
+        "Should detect CustomSerializer from annotation argument: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.exceptions.IOException"),
+        "Should detect IOException from @Throws: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.exceptions.IllegalArgumentException"),
+        "Should detect IllegalArgumentException from @Throws: " + data.usedTypes);
+
+    // Should detect annotations on properties
+    assertTrue(
+        data.usedTypes.contains("com.example.validation.NotNull"),
+        "Should detect NotNull annotation: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.validation.Size"),
+        "Should detect Size annotation: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.serialization.JsonProperty"),
+        "Should detect JsonProperty annotation: " + data.usedTypes);
+
+    // Should detect annotations on functions
+    assertTrue(
+        data.usedTypes.contains("com.example.testing.Test"),
+        "Should detect Test annotation: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.web.RequestMapping"),
+        "Should detect RequestMapping annotation: " + data.usedTypes);
+
+    // Should detect nested class literals in arrays
+    assertTrue(
+        data.usedTypes.contains("com.example.types.TypeA"),
+        "Should detect TypeA from annotation array: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.types.TypeB"),
+        "Should detect TypeB from annotation array: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.types.TypeC"),
+        "Should detect TypeC from annotation array: " + data.usedTypes);
+
+    // Should detect annotations on constructors
+    assertTrue(
+        data.usedTypes.contains("com.example.annotations.Inject"),
+        "Should detect Inject annotation on constructor: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.annotations.Named"),
+        "Should detect Named annotation on parameter: " + data.usedTypes);
+
+    // Should detect use site target annotations
+    assertTrue(
+        data.usedTypes.contains("com.example.validation.Valid"),
+        "Should detect Valid annotation with use site target: " + data.usedTypes);
+
+    // Should detect file-level annotations
+    assertTrue(
+        data.usedTypes.contains("com.example.annotations.JvmName"),
+        "Should detect JvmName file annotation: " + data.usedTypes);
+
+    // Should detect meta-annotations
+    assertTrue(
+        data.usedTypes.contains("com.example.meta.Metadata"),
+        "Should detect Metadata annotation: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.meta.SupportedTypes"),
+        "Should detect SupportedTypes annotation: " + data.usedTypes);
+  }
 }
