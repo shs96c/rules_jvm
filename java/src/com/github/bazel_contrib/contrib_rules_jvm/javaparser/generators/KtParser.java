@@ -15,11 +15,20 @@ import java.util.Set;
 import java.util.Stack;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
+import org.jetbrains.kotlin.analyzer.AnalysisResult;
+import org.jetbrains.kotlin.cli.common.messages.MessageCollector;
 import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles;
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment;
-import org.jetbrains.kotlin.cli.common.messages.MessageCollector;
+import org.jetbrains.kotlin.cli.jvm.compiler.NoScopeRecordCliBindingTrace;
+import org.jetbrains.kotlin.cli.jvm.compiler.TopDownAnalyzerFacadeForJVM;
 import org.jetbrains.kotlin.config.CommonConfigurationKeys;
 import org.jetbrains.kotlin.config.CompilerConfiguration;
+import org.jetbrains.kotlin.descriptors.CallableDescriptor;
+import org.jetbrains.kotlin.descriptors.ClassConstructorDescriptor;
+import org.jetbrains.kotlin.descriptors.ClassDescriptor;
+import org.jetbrains.kotlin.descriptors.DeclarationDescriptor;
+import org.jetbrains.kotlin.descriptors.FunctionDescriptor;
+import org.jetbrains.kotlin.descriptors.PackageFragmentDescriptor;
 import org.jetbrains.kotlin.lexer.KtTokens;
 import org.jetbrains.kotlin.name.FqName;
 import org.jetbrains.kotlin.name.FqNamesUtilKt;
@@ -57,20 +66,11 @@ import org.jetbrains.kotlin.psi.KtTypeParameter;
 import org.jetbrains.kotlin.psi.KtTypeReference;
 import org.jetbrains.kotlin.psi.KtUnaryExpression;
 import org.jetbrains.kotlin.psi.KtUserType;
-import org.jetbrains.kotlin.analyzer.AnalysisResult;
-import org.jetbrains.kotlin.cli.jvm.compiler.NoScopeRecordCliBindingTrace;
-import org.jetbrains.kotlin.cli.jvm.compiler.TopDownAnalyzerFacadeForJVM;
 import org.jetbrains.kotlin.resolve.BindingContext;
 import org.jetbrains.kotlin.resolve.BindingTrace;
+import org.jetbrains.kotlin.resolve.DescriptorUtils;
 import org.jetbrains.kotlin.resolve.calls.model.ResolvedCall;
 import org.jetbrains.kotlin.resolve.calls.util.CallUtilKt;
-import org.jetbrains.kotlin.resolve.DescriptorUtils;
-import org.jetbrains.kotlin.descriptors.CallableDescriptor;
-import org.jetbrains.kotlin.descriptors.ClassConstructorDescriptor;
-import org.jetbrains.kotlin.descriptors.ClassDescriptor;
-import org.jetbrains.kotlin.descriptors.DeclarationDescriptor;
-import org.jetbrains.kotlin.descriptors.FunctionDescriptor;
-import org.jetbrains.kotlin.descriptors.PackageFragmentDescriptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -120,7 +120,7 @@ public class KtParser {
             env.getConfiguration(),
             scope -> env.createPackagePartProvider(scope));
     BindingContext bindingContext = result.getBindingContext();
-    
+
     KtFileVisitor visitor = new KtFileVisitor(bindingContext);
     for (KtFile ktFile : ktFiles) {
       ktFile.accept(visitor);
@@ -234,14 +234,14 @@ public class KtParser {
     @Override
     public void visitClass(KtClass clazz) {
       pushState(clazz);
-      
+
       // Collect supertype references (superclass and interfaces)
       collectSupertypes(clazz.getSuperTypeListEntries());
-      
+
       // Collect type parameter bounds
       collectTypeParameterBounds(clazz.getTypeParameters());
       collectTypeConstraints(clazz.getTypeConstraints());
-      
+
       if (clazz.isLocal() || !isVisible()) {
         super.visitClass(clazz);
         popState(clazz);
@@ -255,10 +255,10 @@ public class KtParser {
     @Override
     public void visitObjectDeclaration(KtObjectDeclaration object) {
       pushState(object);
-      
+
       // Collect supertype references (superclass and interfaces)
       collectSupertypes(object.getSuperTypeListEntries());
-      
+
       if (object.isLocal() || !isVisible()) {
         super.visitObjectDeclaration(object);
         popState(object);
@@ -274,13 +274,13 @@ public class KtParser {
     @Override
     public void visitProperty(KtProperty property) {
       pushState(property);
-      
+
       // Always collect usedTypes from property types, even for local variables
       KtTypeReference typeReference = property.getTypeReference();
       if (typeReference != null) {
         collectUsedType(typeReference);
       }
-      
+
       if (property.isLocal() || !isVisible()) {
         super.visitProperty(property);
         popState(property);
@@ -333,24 +333,24 @@ public class KtParser {
     @Override
     public void visitNamedFunction(KtNamedFunction function) {
       pushState(function);
-      
+
       // Always collect usedTypes from function signatures, even for private functions
       KtTypeReference returnType = function.getTypeReference();
       if (returnType != null) {
         collectUsedType(returnType);
       }
-      
+
       for (KtParameter param : function.getValueParameters()) {
         KtTypeReference paramType = param.getTypeReference();
         if (paramType != null) {
           collectUsedType(paramType);
         }
       }
-      
+
       // Collect type parameter bounds from generic functions
       collectTypeParameterBounds(function.getTypeParameters());
       collectTypeConstraints(function.getTypeConstraints());
-      
+
       if (function.isLocal() || !isVisible()) {
         super.visitNamedFunction(function);
         popState(function);
@@ -636,14 +636,14 @@ public class KtParser {
       logger.debug("AST: Call expression: " + expression.getText());
 
       // Use semantic analysis to resolve the call
-      ResolvedCall<? extends CallableDescriptor> resolvedCall = 
+      ResolvedCall<? extends CallableDescriptor> resolvedCall =
           CallUtilKt.getResolvedCall(expression, bindingContext);
-      
+
       boolean resolved = false;
       if (resolvedCall != null) {
         CallableDescriptor descriptor = resolvedCall.getResultingDescriptor();
         logger.debug("AST: Resolved call to: " + descriptor);
-        
+
         if (descriptor instanceof ClassConstructorDescriptor) {
           // Constructor call - add the containing class
           ClassConstructorDescriptor constructor = (ClassConstructorDescriptor) descriptor;
@@ -658,7 +658,7 @@ public class KtParser {
           // Function call - check if it's a top-level function
           FunctionDescriptor function = (FunctionDescriptor) descriptor;
           DeclarationDescriptor containingDeclaration = function.getContainingDeclaration();
-          
+
           if (containingDeclaration instanceof PackageFragmentDescriptor) {
             // Top-level function in a package
             PackageFragmentDescriptor pkg = (PackageFragmentDescriptor) containingDeclaration;
@@ -694,46 +694,64 @@ public class KtParser {
             KtDotQualifiedExpression dotExpr = (KtDotQualifiedExpression) calleeExpression;
             String receiverFq = flattenQualifiedName(dotExpr.getReceiverExpression());
             KtExpression selector = dotExpr.getSelectorExpression();
-            
+
             if (receiverFq != null && selector instanceof KtSimpleNameExpression) {
               String name = ((KtSimpleNameExpression) selector).getReferencedName();
-              
+
               if (isLikelyClassName(name)) {
                 // Constructor call on fully qualified class: workspace.pkg.Type()
                 String fullClassName = receiverFq + "." + name;
                 packageData.usedTypes.add(fullClassName);
-                logger.debug("AST: Detected fully qualified constructor call (heuristic): " + fullClassName);
+                logger.debug(
+                    "AST: Detected fully qualified constructor call (heuristic): " + fullClassName);
               } else if (receiverIsPackage(receiverFq)) {
                 // Top-level function call via fully qualified package: com.example.fn()
                 packageData.usedPackagesWithoutSpecificTypes.add(receiverFq);
-                logger.debug("AST: Detected fully qualified package function call (heuristic): " + receiverFq + "." + name);
+                logger.debug(
+                    "AST: Detected fully qualified package function call (heuristic): "
+                        + receiverFq
+                        + "."
+                        + name);
               }
             }
           } else {
             // Check if this call is the selector of a parent DotQualifiedExpression
             // e.g., com.example.fn() where fn() is the call expression
             if (expression.getParent() instanceof KtDotQualifiedExpression) {
-              KtDotQualifiedExpression parentDotExpr = (KtDotQualifiedExpression) expression.getParent();
+              KtDotQualifiedExpression parentDotExpr =
+                  (KtDotQualifiedExpression) expression.getParent();
               if (parentDotExpr.getSelectorExpression() == expression) {
                 String receiverFq = flattenQualifiedName(parentDotExpr.getReceiverExpression());
                 // Only process if it's a multi-segment qualified name (contains dots)
                 // This filters out instance method calls like someList.map()
-                if (receiverFq != null && receiverFq.contains(".") && calleeExpression instanceof KtSimpleNameExpression) {
+                if (receiverFq != null
+                    && receiverFq.contains(".")
+                    && calleeExpression instanceof KtSimpleNameExpression) {
                   String name = ((KtSimpleNameExpression) calleeExpression).getReferencedName();
-                  
+
                   if (isLikelyClassName(name)) {
                     // Constructor call: workspace.pkg.Class()
                     String fullClassName = receiverFq + "." + name;
                     packageData.usedTypes.add(fullClassName);
-                    logger.debug("AST: Detected fully qualified constructor call (heuristic): " + fullClassName);
+                    logger.debug(
+                        "AST: Detected fully qualified constructor call (heuristic): "
+                            + fullClassName);
                   } else if (isLikelyClassName(lastSegment(receiverFq))) {
                     // Static method call: workspace.pkg.Class.method()
                     packageData.usedTypes.add(receiverFq);
-                    logger.debug("AST: Detected fully qualified static method call (heuristic): " + receiverFq + "." + name);
+                    logger.debug(
+                        "AST: Detected fully qualified static method call (heuristic): "
+                            + receiverFq
+                            + "."
+                            + name);
                   } else {
                     // Top-level function call: com.example.fn()
                     packageData.usedPackagesWithoutSpecificTypes.add(receiverFq);
-                    logger.debug("AST: Detected fully qualified package function call (heuristic): " + receiverFq + "." + name);
+                    logger.debug(
+                        "AST: Detected fully qualified package function call (heuristic): "
+                            + receiverFq
+                            + "."
+                            + name);
                   }
                 }
               }
@@ -753,13 +771,13 @@ public class KtParser {
       KtExpression receiverExpression = expression.getReceiverExpression();
       if (receiverExpression != null) {
         boolean resolved = false;
-        
+
         // Try semantic analysis first if it's a reference expression
         if (receiverExpression instanceof KtReferenceExpression) {
-          DeclarationDescriptor descriptor = bindingContext.get(
-              BindingContext.REFERENCE_TARGET, 
-              (KtReferenceExpression) receiverExpression);
-          
+          DeclarationDescriptor descriptor =
+              bindingContext.get(
+                  BindingContext.REFERENCE_TARGET, (KtReferenceExpression) receiverExpression);
+
           if (descriptor instanceof ClassDescriptor) {
             FqName fqName = getFqName(descriptor);
             if (fqName != null && !fqName.asString().startsWith("kotlin.")) {
@@ -769,7 +787,7 @@ public class KtParser {
             }
           }
         }
-        
+
         // Fallback to heuristic analysis
         if (!resolved) {
           String classRef = flattenQualifiedName(receiverExpression);
@@ -785,7 +803,8 @@ public class KtParser {
               // Fully qualified reference
               if (!classRef.startsWith("kotlin.")) {
                 packageData.usedTypes.add(classRef);
-                logger.debug("AST: Detected class literal fully qualified (heuristic): " + classRef);
+                logger.debug(
+                    "AST: Detected class literal fully qualified (heuristic): " + classRef);
               }
             }
           }
@@ -839,7 +858,7 @@ public class KtParser {
 
           checkExtensionFunctionCall(receiverType, functionName);
         }
-        
+
         // Check for static method calls on fully qualified classes
         maybeRecordQualifiedCall(expression);
       }
@@ -861,7 +880,7 @@ public class KtParser {
 
           checkExtensionFunctionCall(receiverType, functionName);
         }
-        
+
         // Check for static method calls on fully qualified classes
         maybeRecordQualifiedCall(expression);
       }
@@ -1111,7 +1130,10 @@ public class KtParser {
       return false;
     }
 
-    /** Flatten a qualified expression chain into a dotted string. Returns null if not a simple qualified name. */
+    /**
+     * Flatten a qualified expression chain into a dotted string. Returns null if not a simple
+     * qualified name.
+     */
     private String flattenQualifiedName(KtExpression expression) {
       if (expression instanceof KtSimpleNameExpression) {
         String name = ((KtSimpleNameExpression) expression).getReferencedName();
@@ -1211,34 +1233,36 @@ public class KtParser {
       KtTypeElement typeElement = getRootType(theType);
       Optional<String> maybeQualifiedType = tryGetFullyQualifiedName(typeElement);
       // TODO: Check for java and Kotlin standard library types.
-      maybeQualifiedType.ifPresent(fq -> {
-        // Skip kotlin standard library types
-        if (!fq.startsWith("kotlin.")) {
-          packageData.exportedTypes.add(fq);
-          packageData.usedTypes.add(fq);
-        }
-      });
+      maybeQualifiedType.ifPresent(
+          fq -> {
+            // Skip kotlin standard library types
+            if (!fq.startsWith("kotlin.")) {
+              packageData.exportedTypes.add(fq);
+              packageData.usedTypes.add(fq);
+            }
+          });
     }
 
     private void collectUsedType(KtTypeReference theType) {
       KtTypeElement typeElement = getRootType(theType);
       Optional<String> maybeQualifiedType = tryGetFullyQualifiedName(typeElement);
-      maybeQualifiedType.ifPresent(fq -> {
-        // Skip kotlin standard library types
-        if (!fq.startsWith("kotlin.")) {
-          packageData.usedTypes.add(fq);
-        }
-      });
-      
+      maybeQualifiedType.ifPresent(
+          fq -> {
+            // Skip kotlin standard library types
+            if (!fq.startsWith("kotlin.")) {
+              packageData.usedTypes.add(fq);
+            }
+          });
+
       // Recursively collect type arguments (generics)
       collectTypeArguments(typeElement);
     }
-    
+
     private void collectTypeArguments(KtTypeElement typeElement) {
       if (typeElement instanceof KtUserType) {
         KtUserType userType = (KtUserType) typeElement;
         List<org.jetbrains.kotlin.psi.KtTypeProjection> typeArguments = userType.getTypeArguments();
-        
+
         for (org.jetbrains.kotlin.psi.KtTypeProjection typeArgument : typeArguments) {
           KtTypeReference typeRef = typeArgument.getTypeReference();
           if (typeRef != null) {
@@ -1292,11 +1316,12 @@ public class KtParser {
     private Optional<String> tryGetFullyQualifiedName(KtTypeElement typeElement) {
       if (typeElement instanceof KtUserType) {
         KtUserType userType = (KtUserType) typeElement;
-        
+
         // Try to resolve using semantic analysis first
         KtSimpleNameExpression referenceExpression = userType.getReferenceExpression();
         if (referenceExpression != null) {
-          DeclarationDescriptor descriptor = bindingContext.get(BindingContext.REFERENCE_TARGET, referenceExpression);
+          DeclarationDescriptor descriptor =
+              bindingContext.get(BindingContext.REFERENCE_TARGET, referenceExpression);
           if (descriptor instanceof ClassDescriptor) {
             FqName fqName = getFqName(descriptor);
             if (fqName != null) {
@@ -1304,7 +1329,7 @@ public class KtParser {
             }
           }
         }
-        
+
         // Fallback to heuristic-based resolution
         String fqCandidate = qualifiedNameFromUserType(userType);
         if (fqCandidate.contains(".")) {

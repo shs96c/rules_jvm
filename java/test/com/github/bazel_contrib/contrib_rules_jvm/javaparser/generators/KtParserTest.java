@@ -151,9 +151,7 @@ public class KtParserTest {
   @Test
   public void fullyQualifiedClassAndFunctionUse() throws IOException {
     ParsedPackageData data = parser.parseClasses(getPathsWithNames("FullyQualifieds.kt"));
-    assertEquals(
-      Set.of("com.example"),
-      data.usedPackagesWithoutSpecificTypes);
+    assertEquals(Set.of("com.example"), data.usedPackagesWithoutSpecificTypes);
     assertEquals(
         Set.of(
             "workspace.com.gazelle.java.javaparser.generators.DeleteBookRequest",
