@@ -30,6 +30,7 @@ import org.jetbrains.kotlin.psi.KtBinaryExpression;
 import org.jetbrains.kotlin.psi.KtCallExpression;
 import org.jetbrains.kotlin.psi.KtClass;
 import org.jetbrains.kotlin.psi.KtClassBody;
+import org.jetbrains.kotlin.psi.KtClassLiteralExpression;
 import org.jetbrains.kotlin.psi.KtDestructuringDeclaration;
 import org.jetbrains.kotlin.psi.KtDestructuringDeclarationEntry;
 import org.jetbrains.kotlin.psi.KtDotQualifiedExpression;
@@ -723,6 +724,56 @@ public class KtParser {
       }
 
       super.visitCallExpression(expression);
+    }
+
+    @Override
+    public void visitClassLiteralExpression(KtClassLiteralExpression expression) {
+      logger.debug("AST: Class literal expression: " + expression.getText());
+
+      // Get the receiver expression (the part before ::class)
+      KtExpression receiverExpression = expression.getReceiverExpression();
+      if (receiverExpression != null) {
+        boolean resolved = false;
+        
+        // Try semantic analysis first if it's a reference expression
+        if (receiverExpression instanceof KtReferenceExpression) {
+          DeclarationDescriptor descriptor = bindingContext.get(
+              BindingContext.REFERENCE_TARGET, 
+              (KtReferenceExpression) receiverExpression);
+          
+          if (descriptor instanceof ClassDescriptor) {
+            FqName fqName = getFqName(descriptor);
+            if (fqName != null && !fqName.asString().startsWith("kotlin.")) {
+              packageData.usedTypes.add(fqName.asString());
+              logger.debug("AST: Detected class literal (semantic): " + fqName);
+              resolved = true;
+            }
+          }
+        }
+        
+        // Fallback to heuristic analysis
+        if (!resolved) {
+          String classRef = flattenQualifiedName(receiverExpression);
+          if (classRef != null) {
+            // Try to resolve using imports
+            if (fqImportByNameOrAlias.containsKey(classRef)) {
+              FqName fqName = fqImportByNameOrAlias.get(classRef);
+              if (!fqName.asString().startsWith("kotlin.")) {
+                packageData.usedTypes.add(fqName.asString());
+                logger.debug("AST: Detected class literal from import (heuristic): " + fqName);
+              }
+            } else if (classRef.contains(".")) {
+              // Fully qualified reference
+              if (!classRef.startsWith("kotlin.")) {
+                packageData.usedTypes.add(classRef);
+                logger.debug("AST: Detected class literal fully qualified (heuristic): " + classRef);
+              }
+            }
+          }
+        }
+      }
+
+      super.visitClassLiteralExpression(expression);
     }
 
     @Override

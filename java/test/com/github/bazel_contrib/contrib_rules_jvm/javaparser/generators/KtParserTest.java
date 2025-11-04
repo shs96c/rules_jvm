@@ -337,4 +337,33 @@ public class KtParserTest {
 
     logger.info("Destructuring detection working correctly!");
   }
+
+  @Test
+  public void detectsClassLiterals() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("ClassLiterals.kt"));
+
+    assertNotNull(data.usedTypes, "usedTypes should not be null");
+
+    // Should detect fully qualified class literals
+    assertTrue(
+        data.usedTypes.contains("com.example.MyCustomClass"),
+        "Should detect MyCustomClass from ::class expression: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.data.UserProfile"),
+        "Should detect UserProfile from ::class expression: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("java.util.HashMap"),
+        "Should detect HashMap from ::class expression: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("java.util.ArrayList"),
+        "Should detect ArrayList from ::class expression in list: " + data.usedTypes);
+
+    // Should also detect from imported class literals
+    assertTrue(
+        data.usedTypes.contains("com.example.MyCustomClass"),
+        "Should detect imported MyCustomClass::class: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.data.UserProfile"),
+        "Should detect imported UserProfile::class: " + data.usedTypes);
+  }
 }
