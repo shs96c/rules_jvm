@@ -51,7 +51,9 @@ import org.jetbrains.kotlin.psi.KtSafeQualifiedExpression;
 import org.jetbrains.kotlin.psi.KtSimpleNameExpression;
 import org.jetbrains.kotlin.psi.KtSuperTypeListEntry;
 import org.jetbrains.kotlin.psi.KtTreeVisitorVoid;
+import org.jetbrains.kotlin.psi.KtTypeConstraint;
 import org.jetbrains.kotlin.psi.KtTypeElement;
+import org.jetbrains.kotlin.psi.KtTypeParameter;
 import org.jetbrains.kotlin.psi.KtTypeReference;
 import org.jetbrains.kotlin.psi.KtUnaryExpression;
 import org.jetbrains.kotlin.psi.KtUserType;
@@ -236,6 +238,10 @@ public class KtParser {
       // Collect supertype references (superclass and interfaces)
       collectSupertypes(clazz.getSuperTypeListEntries());
       
+      // Collect type parameter bounds
+      collectTypeParameterBounds(clazz.getTypeParameters());
+      collectTypeConstraints(clazz.getTypeConstraints());
+      
       if (clazz.isLocal() || !isVisible()) {
         super.visitClass(clazz);
         popState(clazz);
@@ -340,6 +346,10 @@ public class KtParser {
           collectUsedType(paramType);
         }
       }
+      
+      // Collect type parameter bounds from generic functions
+      collectTypeParameterBounds(function.getTypeParameters());
+      collectTypeConstraints(function.getTypeConstraints());
       
       if (function.isLocal() || !isVisible()) {
         super.visitNamedFunction(function);
@@ -1219,6 +1229,25 @@ public class KtParser {
           packageData.usedTypes.add(fq);
         }
       });
+      
+      // Recursively collect type arguments (generics)
+      collectTypeArguments(typeElement);
+    }
+    
+    private void collectTypeArguments(KtTypeElement typeElement) {
+      if (typeElement instanceof KtUserType) {
+        KtUserType userType = (KtUserType) typeElement;
+        List<org.jetbrains.kotlin.psi.KtTypeProjection> typeArguments = userType.getTypeArguments();
+        
+        for (org.jetbrains.kotlin.psi.KtTypeProjection typeArgument : typeArguments) {
+          KtTypeReference typeRef = typeArgument.getTypeReference();
+          if (typeRef != null) {
+            // Recursively collect this type argument and its nested arguments
+            collectUsedType(typeRef);
+            logger.debug("AST: Collected generic type argument: " + typeRef.getText());
+          }
+        }
+      }
     }
 
     private void collectSupertypes(List<KtSuperTypeListEntry> supertypes) {
@@ -1227,6 +1256,26 @@ public class KtParser {
         if (typeRef != null) {
           collectUsedType(typeRef);
           logger.debug("AST: Collected supertype: " + typeRef.getText());
+        }
+      }
+    }
+
+    private void collectTypeParameterBounds(List<KtTypeParameter> typeParameters) {
+      for (KtTypeParameter typeParam : typeParameters) {
+        KtTypeReference extendsBound = typeParam.getExtendsBound();
+        if (extendsBound != null) {
+          collectUsedType(extendsBound);
+          logger.debug("AST: Collected type parameter bound: " + extendsBound.getText());
+        }
+      }
+    }
+
+    private void collectTypeConstraints(List<KtTypeConstraint> typeConstraints) {
+      for (KtTypeConstraint constraint : typeConstraints) {
+        KtTypeReference boundTypeReference = constraint.getBoundTypeReference();
+        if (boundTypeReference != null) {
+          collectUsedType(boundTypeReference);
+          logger.debug("AST: Collected type constraint bound: " + boundTypeReference.getText());
         }
       }
     }

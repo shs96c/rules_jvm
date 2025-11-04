@@ -417,4 +417,75 @@ public class KtParserTest {
         data.usedTypes.contains("com.example.interfaces.Comparable"),
         "Should detect enum implementing interface: " + data.usedTypes);
   }
+
+  @Test
+  public void detectsGenericTypeArguments() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("Generics.kt"));
+
+    assertNotNull(data.usedTypes, "usedTypes should not be null");
+
+    // Should detect simple generic type arguments
+    assertTrue(
+        data.usedTypes.contains("com.example.data.User"),
+        "Should detect User from List<User>: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.data.Profile"),
+        "Should detect Profile from Map<String, Profile>: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.nested.Item"),
+        "Should detect Item from Set<Item>: " + data.usedTypes);
+
+    // Should detect nested generics
+    assertTrue(
+        data.usedTypes.contains("com.example.data.User"),
+        "Should detect User from List<Map<String, User>>: " + data.usedTypes);
+
+    // Should detect type parameter bounds
+    assertTrue(
+        data.usedTypes.contains("com.example.base.Entity"),
+        "Should detect Entity from type parameter bound T : Entity: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Comparable"),
+        "Should detect Comparable from type parameter bound: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Serializable"),
+        "Should detect Serializable from type parameter bound: " + data.usedTypes);
+
+    // Should detect function parameter generics
+    assertTrue(
+        data.usedTypes.contains("com.example.data.Input"),
+        "Should detect Input from function parameter generics: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.data.Output"),
+        "Should detect Output from function parameter generics: " + data.usedTypes);
+
+    // Should detect variance annotations
+    assertTrue(
+        data.usedTypes.contains("com.example.Producer"),
+        "Should detect Producer with out variance: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.Consumer"),
+        "Should detect Consumer with in variance: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.Handler"),
+        "Should detect Handler invariant type: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.data.Event"),
+        "Should detect Event from Handler<Event>: " + data.usedTypes);
+
+    // Should detect array element types
+    assertTrue(
+        data.usedTypes.contains("com.example.data.Item"),
+        "Should detect Item from Array<Item>: " + data.usedTypes);
+
+    // Should detect where clause bounds
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Validatable"),
+        "Should detect Validatable from where clause: " + data.usedTypes);
+
+    // Should detect processor type argument
+    assertTrue(
+        data.usedTypes.contains("com.example.Processor"),
+        "Should detect Processor class: " + data.usedTypes);
+  }
 }
