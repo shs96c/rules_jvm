@@ -148,22 +148,22 @@ public class KtParserTest {
         data.perClassData.keySet());
   }
 
-  // @Test
-  // public void fullyQualifiedClassAndFunctionUse() throws IOException {
-  //   ParsedPackageData data = parser.parseClasses(getPathsWithNames("FullyQualifieds.kt"));
-  //   assertEquals(
-  //     Set.of("com.example"),
-  //     data.usedPackagesWithoutSpecificTypes);
-  //   assertEquals(
-  //       Set.of(
-  //           "workspace.com.gazelle.java.javaparser.generators.DeleteBookRequest",
-  //           "workspace.com.gazelle.java.javaparser.generators.DeleteBookResponse",
-  //           "workspace.com.gazelle.java.javaparser.utils.Printer",
-  //           "workspace.com.gazelle.java.javaparser.factories.Factory",
-  //           "java.util.ArrayList",
-  //           "com.example.PrivateArg"),
-  //       data.usedTypes);
-  // }
+  @Test
+  public void fullyQualifiedClassAndFunctionUse() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("FullyQualifieds.kt"));
+    assertEquals(
+      Set.of("com.example"),
+      data.usedPackagesWithoutSpecificTypes);
+    assertEquals(
+        Set.of(
+            "workspace.com.gazelle.java.javaparser.generators.DeleteBookRequest",
+            "workspace.com.gazelle.java.javaparser.generators.DeleteBookResponse",
+            "workspace.com.gazelle.java.javaparser.utils.Printer",
+            "workspace.com.gazelle.java.javaparser.factories.Factory",
+            "java.util.ArrayList",
+            "com.example.PrivateArg"),
+        data.usedTypes);
+  }
 
   @Test
   public void staticImportsTest() throws IOException {

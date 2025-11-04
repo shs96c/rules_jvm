@@ -17,6 +17,7 @@ import java.util.TreeSet;
 import java.util.stream.Collectors;
 import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles;
 import org.jetbrains.kotlin.cli.jvm.compiler.KotlinCoreEnvironment;
+import org.jetbrains.kotlin.cli.common.messages.MessageCollector;
 import org.jetbrains.kotlin.config.CommonConfigurationKeys;
 import org.jetbrains.kotlin.config.CompilerConfiguration;
 import org.jetbrains.kotlin.lexer.KtTokens;
@@ -52,6 +53,20 @@ import org.jetbrains.kotlin.psi.KtTypeElement;
 import org.jetbrains.kotlin.psi.KtTypeReference;
 import org.jetbrains.kotlin.psi.KtUnaryExpression;
 import org.jetbrains.kotlin.psi.KtUserType;
+import org.jetbrains.kotlin.analyzer.AnalysisResult;
+import org.jetbrains.kotlin.cli.jvm.compiler.NoScopeRecordCliBindingTrace;
+import org.jetbrains.kotlin.cli.jvm.compiler.TopDownAnalyzerFacadeForJVM;
+import org.jetbrains.kotlin.resolve.BindingContext;
+import org.jetbrains.kotlin.resolve.BindingTrace;
+import org.jetbrains.kotlin.resolve.calls.model.ResolvedCall;
+import org.jetbrains.kotlin.resolve.calls.util.CallUtilKt;
+import org.jetbrains.kotlin.resolve.DescriptorUtils;
+import org.jetbrains.kotlin.descriptors.CallableDescriptor;
+import org.jetbrains.kotlin.descriptors.ClassConstructorDescriptor;
+import org.jetbrains.kotlin.descriptors.ClassDescriptor;
+import org.jetbrains.kotlin.descriptors.DeclarationDescriptor;
+import org.jetbrains.kotlin.descriptors.FunctionDescriptor;
+import org.jetbrains.kotlin.descriptors.PackageFragmentDescriptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -66,10 +81,10 @@ public class KtParser {
   private final PsiManager psiManager = PsiManager.getInstance(env.getProject());
 
   public ParsedPackageData parseClasses(List<Path> files) {
-    KtFileVisitor visitor = new KtFileVisitor();
     List<VirtualFile> virtualFiles =
         files.stream().map(f -> vfm.findFileByNioPath(f)).collect(Collectors.toUnmodifiableList());
 
+    List<KtFile> ktFiles = new java.util.ArrayList<>();
     for (VirtualFile virtualFile : virtualFiles) {
       if (virtualFile == null) {
         throw new IllegalArgumentException("File not found: " + files.get(0));
@@ -88,6 +103,22 @@ public class KtParser {
       logger.debug("import directives: {}", ktFile.getImportDirectives());
       logger.debug("import list: {}", ktFile.getImportList());
 
+      ktFiles.add(ktFile);
+    }
+
+    // Create BindingContext for semantic analysis
+    BindingTrace trace = new NoScopeRecordCliBindingTrace(env.getProject());
+    AnalysisResult result =
+        TopDownAnalyzerFacadeForJVM.analyzeFilesWithJavaIntegration(
+            env.getProject(),
+            ktFiles,
+            trace,
+            env.getConfiguration(),
+            scope -> env.createPackagePartProvider(scope));
+    BindingContext bindingContext = result.getBindingContext();
+    
+    KtFileVisitor visitor = new KtFileVisitor(bindingContext);
+    for (KtFile ktFile : ktFiles) {
       ktFile.accept(visitor);
     }
 
@@ -97,12 +128,14 @@ public class KtParser {
   private static CompilerConfiguration createCompilerConfiguration() {
     CompilerConfiguration conf = new CompilerConfiguration();
     conf.put(CommonConfigurationKeys.MODULE_NAME, "bazel-module");
+    conf.put(CommonConfigurationKeys.MESSAGE_COLLECTOR_KEY, MessageCollector.Companion.getNONE());
 
     return conf;
   }
 
   public static class KtFileVisitor extends KtTreeVisitorVoid {
     final ParsedPackageData packageData = new ParsedPackageData();
+    private final BindingContext bindingContext;
 
     private Stack<Visibility> visibilityStack = new Stack<>();
     private HashMap<String, FqName> fqImportByNameOrAlias = new HashMap<>();
@@ -129,6 +162,10 @@ public class KtParser {
     // Track when we're inside a componentN() function to detect its dependencies
     private String currentComponentFunction = null;
     private Set<String> currentComponentFunctionDeps = null;
+
+    public KtFileVisitor(BindingContext bindingContext) {
+      this.bindingContext = bindingContext;
+    }
 
     @Override
     public void visitPackageDirective(KtPackageDirective packageDirective) {
@@ -221,13 +258,20 @@ public class KtParser {
     @Override
     public void visitProperty(KtProperty property) {
       pushState(property);
+      
+      // Always collect usedTypes from property types, even for local variables
+      KtTypeReference typeReference = property.getTypeReference();
+      if (typeReference != null) {
+        collectUsedType(typeReference);
+      }
+      
       if (property.isLocal() || !isVisible()) {
         super.visitProperty(property);
         popState(property);
         return;
       }
 
-      KtTypeReference typeReference = property.getTypeReference();
+      // For public properties, also add to exportedTypes
       if (typeReference != null) {
         addExportedTypeIfNeeded(typeReference);
       }
@@ -273,6 +317,20 @@ public class KtParser {
     @Override
     public void visitNamedFunction(KtNamedFunction function) {
       pushState(function);
+      
+      // Always collect usedTypes from function signatures, even for private functions
+      KtTypeReference returnType = function.getTypeReference();
+      if (returnType != null) {
+        collectUsedType(returnType);
+      }
+      
+      for (KtParameter param : function.getValueParameters()) {
+        KtTypeReference paramType = param.getTypeReference();
+        if (paramType != null) {
+          collectUsedType(paramType);
+        }
+      }
+      
       if (function.isLocal() || !isVisible()) {
         super.visitNamedFunction(function);
         popState(function);
@@ -349,9 +407,16 @@ public class KtParser {
         }
       }
 
-      KtTypeReference returnType = function.getTypeReference();
+      // Add return and parameter types to exportedTypes (for public functions)
       if (returnType != null) {
         addExportedTypeIfNeeded(returnType);
+      }
+
+      for (KtParameter param : function.getValueParameters()) {
+        KtTypeReference paramType = param.getTypeReference();
+        if (paramType != null) {
+          addExportedTypeIfNeeded(paramType);
+        }
       }
 
       // Visit the function body to collect dependencies
@@ -550,13 +615,111 @@ public class KtParser {
     public void visitCallExpression(KtCallExpression expression) {
       logger.debug("AST: Call expression: " + expression.getText());
 
-      KtExpression calleeExpression = expression.getCalleeExpression();
-      if (calleeExpression != null) {
-        String functionName = calleeExpression.getText();
-        logger.debug("AST: Function call detected: " + functionName);
+      // Use semantic analysis to resolve the call
+      ResolvedCall<? extends CallableDescriptor> resolvedCall = 
+          CallUtilKt.getResolvedCall(expression, bindingContext);
+      
+      boolean resolved = false;
+      if (resolvedCall != null) {
+        CallableDescriptor descriptor = resolvedCall.getResultingDescriptor();
+        logger.debug("AST: Resolved call to: " + descriptor);
+        
+        if (descriptor instanceof ClassConstructorDescriptor) {
+          // Constructor call - add the containing class
+          ClassConstructorDescriptor constructor = (ClassConstructorDescriptor) descriptor;
+          ClassDescriptor containingClass = constructor.getConstructedClass();
+          FqName fqName = getFqName(containingClass);
+          if (fqName != null) {
+            packageData.usedTypes.add(fqName.asString());
+            logger.debug("AST: Detected constructor call for class: " + fqName);
+            resolved = true;
+          }
+        } else if (descriptor instanceof FunctionDescriptor) {
+          // Function call - check if it's a top-level function
+          FunctionDescriptor function = (FunctionDescriptor) descriptor;
+          DeclarationDescriptor containingDeclaration = function.getContainingDeclaration();
+          
+          if (containingDeclaration instanceof PackageFragmentDescriptor) {
+            // Top-level function in a package
+            PackageFragmentDescriptor pkg = (PackageFragmentDescriptor) containingDeclaration;
+            FqName packageFqName = pkg.getFqName();
+            packageData.usedPackagesWithoutSpecificTypes.add(packageFqName.asString());
+            logger.debug("AST: Detected top-level function call in package: " + packageFqName);
+            resolved = true;
+          } else if (containingDeclaration instanceof ClassDescriptor) {
+            // Static/companion method - add the containing class
+            ClassDescriptor containingClass = (ClassDescriptor) containingDeclaration;
+            FqName fqName = getFqName(containingClass);
+            if (fqName != null) {
+              packageData.usedTypes.add(fqName.asString());
+              logger.debug("AST: Detected static method call on class: " + fqName);
+              resolved = true;
+            }
+          }
+        }
+      }
 
-        // Check if this is a call to a known inline function
-        checkInlineFunctionUsage(functionName);
+      // Fallback to heuristic analysis if resolution failed
+      if (!resolved) {
+        KtExpression calleeExpression = expression.getCalleeExpression();
+        if (calleeExpression != null) {
+          String functionName = calleeExpression.getText();
+          logger.debug("AST: Function call detected: " + functionName);
+
+          // Check if this is a call to a known inline function
+          checkInlineFunctionUsage(functionName);
+
+          // Handle fully qualified constructor calls and function calls
+          if (calleeExpression instanceof KtDotQualifiedExpression) {
+            KtDotQualifiedExpression dotExpr = (KtDotQualifiedExpression) calleeExpression;
+            String receiverFq = flattenQualifiedName(dotExpr.getReceiverExpression());
+            KtExpression selector = dotExpr.getSelectorExpression();
+            
+            if (receiverFq != null && selector instanceof KtSimpleNameExpression) {
+              String name = ((KtSimpleNameExpression) selector).getReferencedName();
+              
+              if (isLikelyClassName(name)) {
+                // Constructor call on fully qualified class: workspace.pkg.Type()
+                String fullClassName = receiverFq + "." + name;
+                packageData.usedTypes.add(fullClassName);
+                logger.debug("AST: Detected fully qualified constructor call (heuristic): " + fullClassName);
+              } else if (receiverIsPackage(receiverFq)) {
+                // Top-level function call via fully qualified package: com.example.fn()
+                packageData.usedPackagesWithoutSpecificTypes.add(receiverFq);
+                logger.debug("AST: Detected fully qualified package function call (heuristic): " + receiverFq + "." + name);
+              }
+            }
+          } else {
+            // Check if this call is the selector of a parent DotQualifiedExpression
+            // e.g., com.example.fn() where fn() is the call expression
+            if (expression.getParent() instanceof KtDotQualifiedExpression) {
+              KtDotQualifiedExpression parentDotExpr = (KtDotQualifiedExpression) expression.getParent();
+              if (parentDotExpr.getSelectorExpression() == expression) {
+                String receiverFq = flattenQualifiedName(parentDotExpr.getReceiverExpression());
+                // Only process if it's a multi-segment qualified name (contains dots)
+                // This filters out instance method calls like someList.map()
+                if (receiverFq != null && receiverFq.contains(".") && calleeExpression instanceof KtSimpleNameExpression) {
+                  String name = ((KtSimpleNameExpression) calleeExpression).getReferencedName();
+                  
+                  if (isLikelyClassName(name)) {
+                    // Constructor call: workspace.pkg.Class()
+                    String fullClassName = receiverFq + "." + name;
+                    packageData.usedTypes.add(fullClassName);
+                    logger.debug("AST: Detected fully qualified constructor call (heuristic): " + fullClassName);
+                  } else if (isLikelyClassName(lastSegment(receiverFq))) {
+                    // Static method call: workspace.pkg.Class.method()
+                    packageData.usedTypes.add(receiverFq);
+                    logger.debug("AST: Detected fully qualified static method call (heuristic): " + receiverFq + "." + name);
+                  } else {
+                    // Top-level function call: com.example.fn()
+                    packageData.usedPackagesWithoutSpecificTypes.add(receiverFq);
+                    logger.debug("AST: Detected fully qualified package function call (heuristic): " + receiverFq + "." + name);
+                  }
+                }
+              }
+            }
+          }
+        }
       }
 
       super.visitCallExpression(expression);
@@ -606,6 +769,9 @@ public class KtParser {
 
           checkExtensionFunctionCall(receiverType, functionName);
         }
+        
+        // Check for static method calls on fully qualified classes
+        maybeRecordQualifiedCall(expression);
       }
 
       super.visitDotQualifiedExpression(expression);
@@ -625,6 +791,9 @@ public class KtParser {
 
           checkExtensionFunctionCall(receiverType, functionName);
         }
+        
+        // Check for static method calls on fully qualified classes
+        maybeRecordQualifiedCall(expression);
       }
 
       super.visitSafeQualifiedExpression(expression);
@@ -731,6 +900,22 @@ public class KtParser {
     /** Get statistics about destructuring declarations detected during parsing. */
     public int getDestructuringDeclarationCount() {
       return detectedDestructuringDeclarations.size();
+    }
+
+    /** Get the fully qualified name of a declaration descriptor. */
+    private FqName getFqName(DeclarationDescriptor descriptor) {
+      try {
+        return DescriptorUtils.getFqNameSafe(descriptor);
+      } catch (Exception e) {
+        logger.debug("Failed to get FqName for descriptor: " + descriptor, e);
+        return null;
+      }
+    }
+
+    /** Record fully qualified class usage in qualified call expressions. */
+    private void maybeRecordQualifiedCall(KtQualifiedExpression expr) {
+      // Now handled by visitCallExpression with semantic analysis
+      // This method is kept for compatibility but does nothing
     }
 
     /** Check if a function call is to a known inline function and track its usage. */
@@ -856,6 +1041,50 @@ public class KtParser {
       return false;
     }
 
+    /** Flatten a qualified expression chain into a dotted string. Returns null if not a simple qualified name. */
+    private String flattenQualifiedName(KtExpression expression) {
+      if (expression instanceof KtSimpleNameExpression) {
+        String name = ((KtSimpleNameExpression) expression).getReferencedName();
+        // Skip 'this' and 'super' references
+        if ("this".equals(name) || "super".equals(name)) {
+          return null;
+        }
+        return name;
+      } else if (expression instanceof KtDotQualifiedExpression) {
+        KtDotQualifiedExpression dotExpr = (KtDotQualifiedExpression) expression;
+        String receiverName = flattenQualifiedName(dotExpr.getReceiverExpression());
+        if (receiverName == null) {
+          return null;
+        }
+        KtExpression selector = dotExpr.getSelectorExpression();
+        if (selector instanceof KtSimpleNameExpression) {
+          String selectorName = ((KtSimpleNameExpression) selector).getReferencedName();
+          return receiverName + "." + selectorName;
+        }
+      }
+      // For calls, generics, or other complex expressions, return null
+      return null;
+    }
+
+    /** Get the last segment of a dotted name. */
+    private String lastSegment(String fqName) {
+      if (fqName == null) {
+        return null;
+      }
+      int lastDot = fqName.lastIndexOf('.');
+      return lastDot >= 0 ? fqName.substring(lastDot + 1) : fqName;
+    }
+
+    /** Check if a fully qualified name appears to be a package (all lowercase segments). */
+    private boolean receiverIsPackage(String fqName) {
+      if (fqName == null) {
+        return false;
+      }
+      // If the last segment looks like a class name, it's not just a package
+      String last = lastSegment(fqName);
+      return !isLikelyClassName(last);
+    }
+
     private boolean firstLetterIsUppercase(String value) {
       for (int i = 0; i < value.length(); i++) {
         char c = value.charAt(i);
@@ -912,7 +1141,24 @@ public class KtParser {
       KtTypeElement typeElement = getRootType(theType);
       Optional<String> maybeQualifiedType = tryGetFullyQualifiedName(typeElement);
       // TODO: Check for java and Kotlin standard library types.
-      maybeQualifiedType.ifPresent(packageData.exportedTypes::add);
+      maybeQualifiedType.ifPresent(fq -> {
+        // Skip kotlin standard library types
+        if (!fq.startsWith("kotlin.")) {
+          packageData.exportedTypes.add(fq);
+          packageData.usedTypes.add(fq);
+        }
+      });
+    }
+
+    private void collectUsedType(KtTypeReference theType) {
+      KtTypeElement typeElement = getRootType(theType);
+      Optional<String> maybeQualifiedType = tryGetFullyQualifiedName(typeElement);
+      maybeQualifiedType.ifPresent(fq -> {
+        // Skip kotlin standard library types
+        if (!fq.startsWith("kotlin.")) {
+          packageData.usedTypes.add(fq);
+        }
+      });
     }
 
     private KtTypeElement getRootType(KtTypeReference typeReference) {
@@ -927,19 +1173,36 @@ public class KtParser {
     private Optional<String> tryGetFullyQualifiedName(KtTypeElement typeElement) {
       if (typeElement instanceof KtUserType) {
         KtUserType userType = (KtUserType) typeElement;
-        String identifier = userType.getReferencedName();
-        if (identifier.contains(".")) {
-          return Optional.of(identifier);
-        } else {
-          if (fqImportByNameOrAlias.containsKey(identifier)) {
-            return Optional.of(fqImportByNameOrAlias.get(identifier).toString());
-          } else {
-            return Optional.empty();
+        
+        // Try to resolve using semantic analysis first
+        KtSimpleNameExpression referenceExpression = userType.getReferenceExpression();
+        if (referenceExpression != null) {
+          DeclarationDescriptor descriptor = bindingContext.get(BindingContext.REFERENCE_TARGET, referenceExpression);
+          if (descriptor instanceof ClassDescriptor) {
+            FqName fqName = getFqName(descriptor);
+            if (fqName != null) {
+              return Optional.of(fqName.asString());
+            }
           }
         }
-      } else {
-        return Optional.empty();
+        
+        // Fallback to heuristic-based resolution
+        String fqCandidate = qualifiedNameFromUserType(userType);
+        if (fqCandidate.contains(".")) {
+          return Optional.of(fqCandidate);
+        } else if (fqImportByNameOrAlias.containsKey(fqCandidate)) {
+          return Optional.of(fqImportByNameOrAlias.get(fqCandidate).toString());
+        }
       }
+      return Optional.empty();
+    }
+
+    private String qualifiedNameFromUserType(KtUserType userType) {
+      String name = userType.getReferencedName();
+      KtUserType qual = userType.getQualifier();
+      if (qual == null) return name == null ? "" : name;
+      String prefix = qualifiedNameFromUserType(qual);
+      return (prefix.isEmpty() || name == null) ? prefix : prefix + "." + name;
     }
 
     private FqName javaClassNameForKtFile(KtFile file) {
