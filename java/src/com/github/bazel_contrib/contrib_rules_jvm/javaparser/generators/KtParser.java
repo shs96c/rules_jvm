@@ -49,6 +49,7 @@ import org.jetbrains.kotlin.psi.KtQualifiedExpression;
 import org.jetbrains.kotlin.psi.KtReferenceExpression;
 import org.jetbrains.kotlin.psi.KtSafeQualifiedExpression;
 import org.jetbrains.kotlin.psi.KtSimpleNameExpression;
+import org.jetbrains.kotlin.psi.KtSuperTypeListEntry;
 import org.jetbrains.kotlin.psi.KtTreeVisitorVoid;
 import org.jetbrains.kotlin.psi.KtTypeElement;
 import org.jetbrains.kotlin.psi.KtTypeReference;
@@ -231,6 +232,10 @@ public class KtParser {
     @Override
     public void visitClass(KtClass clazz) {
       pushState(clazz);
+      
+      // Collect supertype references (superclass and interfaces)
+      collectSupertypes(clazz.getSuperTypeListEntries());
+      
       if (clazz.isLocal() || !isVisible()) {
         super.visitClass(clazz);
         popState(clazz);
@@ -244,6 +249,10 @@ public class KtParser {
     @Override
     public void visitObjectDeclaration(KtObjectDeclaration object) {
       pushState(object);
+      
+      // Collect supertype references (superclass and interfaces)
+      collectSupertypes(object.getSuperTypeListEntries());
+      
       if (object.isLocal() || !isVisible()) {
         super.visitObjectDeclaration(object);
         popState(object);
@@ -1210,6 +1219,16 @@ public class KtParser {
           packageData.usedTypes.add(fq);
         }
       });
+    }
+
+    private void collectSupertypes(List<KtSuperTypeListEntry> supertypes) {
+      for (KtSuperTypeListEntry entry : supertypes) {
+        KtTypeReference typeRef = entry.getTypeReference();
+        if (typeRef != null) {
+          collectUsedType(typeRef);
+          logger.debug("AST: Collected supertype: " + typeRef.getText());
+        }
+      }
     }
 
     private KtTypeElement getRootType(KtTypeReference typeReference) {

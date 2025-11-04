@@ -366,4 +366,55 @@ public class KtParserTest {
         data.usedTypes.contains("com.example.data.UserProfile"),
         "Should detect imported UserProfile::class: " + data.usedTypes);
   }
+
+  @Test
+  public void detectsInheritanceAndInterfaces() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("Inheritance.kt"));
+
+    assertNotNull(data.usedTypes, "usedTypes should not be null");
+
+    // Should detect superclasses
+    assertTrue(
+        data.usedTypes.contains("com.example.BaseClass"),
+        "Should detect BaseClass from class inheritance: " + data.usedTypes);
+
+    // Should detect interfaces
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Clickable"),
+        "Should detect Clickable interface: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Focusable"),
+        "Should detect Focusable interface: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.EventHandler"),
+        "Should detect EventHandler interface: " + data.usedTypes);
+
+    // Should detect delegation targets
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Clickable"),
+        "Should detect delegation interface: " + data.usedTypes);
+
+    // Should detect nested inheritance
+    assertTrue(
+        data.usedTypes.contains("com.example.nested.InnerBase"),
+        "Should detect nested class inheritance: " + data.usedTypes);
+
+    // Should detect sealed class hierarchy
+    assertTrue(
+        data.usedTypes.contains("com.example.sealed.BaseResult"),
+        "Should detect sealed class supertype: " + data.usedTypes);
+
+    // Should detect interface inheritance
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Base"),
+        "Should detect interface extending interface: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Extended"),
+        "Should detect second extended interface: " + data.usedTypes);
+
+    // Should detect enum interface implementation
+    assertTrue(
+        data.usedTypes.contains("com.example.interfaces.Comparable"),
+        "Should detect enum implementing interface: " + data.usedTypes);
+  }
 }
