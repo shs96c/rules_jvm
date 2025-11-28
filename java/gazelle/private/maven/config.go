@@ -121,7 +121,6 @@ func loadIndex(filename string) (*IndexFile, error) {
 	}
 	return &index, nil
 }
-
 func loadConfiguration(filename string) (lockFile, error) {
 	data, err := os.ReadFile(filename)
 	if err != nil {
