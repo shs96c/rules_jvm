@@ -119,6 +119,7 @@ func NewResolver(opts ...ResolverOption) (Resolver, error) {
 		return &r, nil
 	}
 
+
 	dependencies := c.ListDependencies()
 
 	r.logger.Debug().Int("count", len(dependencies)).Msg("Dependency count")
