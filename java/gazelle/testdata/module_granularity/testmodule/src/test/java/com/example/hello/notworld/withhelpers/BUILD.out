@@ -5,7 +5,6 @@ load("@contrib_rules_jvm//java:defs.bzl", "java_test_suite")
 java_test_suite(
     name = "withhelpers-tests",
     srcs = [
-        "Helper.java",
         "NotWorldWithHelpersTest.java",
         "withdirectory/AnotherTest.java",
         "withdirectory/Helper.java",
@@ -18,6 +17,9 @@ java_test_suite(
         "@maven//:org_junit_vintage_junit_vintage_engine",
     ],
     deps = [
+        "//notmodule/src/main/java/com/example/hello/notworld",
+        "//testmodule/src/main/java/com/example/hello/notworld/justhelpersinmodule",
+        "//testmodule/src/test/java/com/example/hello/notworld/justhelpersinmodule:justhelpersinmodule-tests-test-lib",
         "@maven//:junit_junit",
         "@maven//:org_hamcrest_hamcrest_all",
         "@maven//:org_junit_jupiter_junit_jupiter_api",

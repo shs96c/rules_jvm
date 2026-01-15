@@ -8,4 +8,5 @@ java_test_suite(
         "Helper.java",
         "withdirectory/Helper.java",
     ],
+    deps = ["//testmodule/src/main/java/com/example/hello/notworld/justhelpersinmodule"],
 )
