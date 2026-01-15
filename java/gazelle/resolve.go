@@ -298,7 +298,11 @@ func (jr *Resolver) resolveSinglePackage(c *config.Config, pc *javaconfig.Config
 	}
 
 	if len(matches) == 1 {
-		return matches[0].Label
+		// When resolving for a test rule, don't return early on a single regular match.
+		// Instead, continue to check for test suite matches first, which should be preferred.
+		if !isTestRule {
+			return matches[0].Label
+		}
 	}
 
 	if len(matches) > 1 {
@@ -370,7 +374,29 @@ func (jr *Resolver) resolveSinglePackage(c *config.Config, pc *javaconfig.Config
 		testonlyMatches := ix.FindRulesByImportWithConfig(c, testonlyImportSpec, languageName)
 		if len(testonlyMatches) == 1 {
 			cacheKey = testonlyCacheKey
-			return simplifyLabel(c.RepoName, testonlyMatches[0].Label, from)
+			l := testonlyMatches[0].Label
+			// If the testonly match is a test suite (name ends with "-tests"), append "-test-lib"
+			// This handles the case where test suites are found as testonly matches but should
+			// be resolved to their -test-lib target for use in other test rules.
+			if strings.HasSuffix(l.Name, "-tests") && l != from {
+				l.Name += "-test-lib"
+				return simplifyLabel(c.RepoName, l, from)
+			}
+			return simplifyLabel(c.RepoName, l, from)
+		}
+
+		// If there are multiple testonly matches, prefer a test suite match (name ends with "-tests")
+		// and append "-test-lib" to it. This handles cases where multiple test targets provide
+		// the same package, but we want to prefer the test suite's -test-lib target.
+		if len(testonlyMatches) > 1 {
+			for _, match := range testonlyMatches {
+				if strings.HasSuffix(match.Label.Name, "-tests") && match.Label != from {
+					cacheKey = testonlyCacheKey
+					l := match.Label
+					l.Name += "-test-lib"
+					return simplifyLabel(c.RepoName, l, from)
+				}
+			}
 		}
 
 		// If there's exactly one testonly match, use it
@@ -385,6 +411,12 @@ func (jr *Resolver) resolveSinglePackage(c *config.Config, pc *javaconfig.Config
 				return simplifyLabel(c.RepoName, l, from)
 			}
 		}
+	}
+
+	// If we deferred returning a regular match earlier (because isTestRule was true),
+	// and no test suite match was found, return the regular match now.
+	if isTestRule && len(matches) == 1 {
+		return simplifyLabel(c.RepoName, matches[0].Label, from)
 	}
 
 	if isTestRule && ownPackageNames.Contains(imp) {

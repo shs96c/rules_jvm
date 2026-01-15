@@ -1,0 +1,9 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
+# gazelle:java_module_granularity module
+
+java_library(
+    name = "justhelpersinmodule",
+    srcs = ["withdirectory/Model.java"],
+    visibility = ["//:__subpackages__"],
+)
