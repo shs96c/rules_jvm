@@ -198,8 +198,17 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				addNonLocalImportsAndExports(productionJavaImports, productionJavaImportedClasses, nonLocalJavaExports, nil, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, likelyLocalClassNames)
 				for _, f := range mJavaPkg.Files.SortedSlice() {
 					productionJavaFiles.Add(filepath.Join(mRel, f))
-					jf := javaFile{pathRelativeToBazelWorkspaceRoot: filepath.Join(mRel, f), pkg: mJavaPkg.Name}
-					nonLocalJavaExportedClasses.Add(*jf.ClassName())
+				}
+				// Add all defined classes (including inner classes) for class-level resolution.
+				// Use DefinedClasses if available (Java files), otherwise fall back to
+				// deriving class names from filenames (Kotlin files).
+				if mJavaPkg.DefinedClasses != nil && mJavaPkg.DefinedClasses.Len() > 0 {
+					nonLocalJavaExportedClasses.AddAll(mJavaPkg.DefinedClasses)
+				} else {
+					for _, f := range mJavaPkg.Files.SortedSlice() {
+						jf := javaFile{pathRelativeToBazelWorkspaceRoot: filepath.Join(mRel, f), pkg: mJavaPkg.Name}
+						nonLocalJavaExportedClasses.Add(*jf.ClassName())
+					}
 				}
 				allMains.AddAll(mJavaPkg.Mains)
 			} else {
@@ -237,8 +246,20 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				accumulateJavaFile(cfg, testJavaFiles, testHelperJavaFiles, separateTestJavaFiles, file, javaPkg.PerClassMetadata, log)
 			} else {
 				productionJavaFiles.Add(path)
-				jf := javaFile{pathRelativeToBazelWorkspaceRoot: path, pkg: javaPkg.Name}
-				nonLocalJavaExportedClasses.Add(*jf.ClassName())
+			}
+		}
+		// Add all defined classes (including inner classes) for class-level resolution.
+		// Use DefinedClasses if available (Java files), otherwise fall back to
+		// deriving class names from filenames (Kotlin files).
+		if !javaPkg.TestPackage {
+			if javaPkg.DefinedClasses != nil && javaPkg.DefinedClasses.Len() > 0 {
+				nonLocalJavaExportedClasses.AddAll(javaPkg.DefinedClasses)
+			} else {
+				for _, f := range srcFilenamesRelativeToPackage {
+					path := filepath.Join(args.Rel, f)
+					jf := javaFile{pathRelativeToBazelWorkspaceRoot: path, pkg: javaPkg.Name}
+					nonLocalJavaExportedClasses.Add(*jf.ClassName())
+				}
 			}
 		}
 		for _, annotationClass := range javaPkg.AllAnnotations().SortedSlice() {

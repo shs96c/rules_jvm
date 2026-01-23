@@ -194,7 +194,8 @@ public class GrpcServer {
               .addAllExportedClasses(data.exportedTypes)
               .addAllImportedPackagesWithoutSpecificClasses(data.usedPackagesWithoutSpecificTypes)
               .addAllMains(data.mainClasses)
-              .addAllSamePackageTypeReferences(data.samePackageTypeReferences);
+              .addAllSamePackageTypeReferences(data.samePackageTypeReferences)
+              .addAllDefinedClasses(data.definedClasses);
       for (Map.Entry<String, PerClassData> classEntry : data.perClassData.entrySet()) {
         PerClassMetadata.Builder perClassMetadata =
             PerClassMetadata.newBuilder()

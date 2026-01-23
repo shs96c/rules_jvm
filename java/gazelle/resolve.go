@@ -44,6 +44,25 @@ type packageClassIndex struct {
 	test map[string][]label.Label
 }
 
+// addUnique adds a label to the slice for a given key, but only if it's not already present.
+func (pci *packageClassIndex) addProd(key string, l label.Label) {
+	for _, existing := range pci.prod[key] {
+		if existing == l {
+			return
+		}
+	}
+	pci.prod[key] = append(pci.prod[key], l)
+}
+
+func (pci *packageClassIndex) addTest(key string, l label.Label) {
+	for _, existing := range pci.test[key] {
+		if existing == l {
+			return
+		}
+	}
+	pci.test[key] = append(pci.test[key], l)
+}
+
 func NewResolver(lang *javaLang) *Resolver {
 	internalCache, err := lru.New(10000)
 	if err != nil {
@@ -441,11 +460,22 @@ func (jr *Resolver) buildPackageClassIndex(c *config.Config, pkg types.PackageNa
 			if cls.PackageName() != pkg {
 				continue
 			}
-			name := cls.BareOuterClassName()
+			// Index by outer class name
+			outerName := cls.BareOuterClassName()
 			if info.testonly {
-				pci.test[name] = append(pci.test[name], m.Label)
+				pci.addTest(outerName, m.Label)
 			} else {
-				pci.prod[name] = append(pci.prod[name], m.Label)
+				pci.addProd(outerName, m.Label)
+			}
+			// Also index by innermost class name for same-package inner class references.
+			// In Java, inner classes can be referenced by simple name from within the same package.
+			innerName := cls.BareInnermostClassName()
+			if innerName != outerName {
+				if info.testonly {
+					pci.addTest(innerName, m.Label)
+				} else {
+					pci.addProd(innerName, m.Label)
+				}
 			}
 		}
 	}

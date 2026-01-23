@@ -1,12 +1,12 @@
 package com.example.time;
 
-// NOTE: This file is in the SAME Java package as Clock and FakeClock,
+// NOTE: This file is in the SAME Java package as Clock, FakeClock, and Errors,
 // but in a DIFFERENT Bazel package.
 //
-// Since Clock and FakeClock are in the same Java package, no import is needed.
-// This is where the Gazelle bug manifests: the Java parser doesn't track
-// same-package type references, so Gazelle doesn't know this file depends
-// on Clock and FakeClock.
+// Since these classes are in the same Java package, no import is needed.
+// This tests that Gazelle correctly tracks:
+// 1. Same-package type references (Clock, FakeClock)
+// 2. Inner class references (ErrorsPresentException is Errors.ErrorsPresentException)
 
 public class FakeClockModule {
     // Uses Clock and FakeClock from the same Java package (no import needed)
@@ -20,5 +20,15 @@ public class FakeClockModule {
 
     public Clock getClock() {
         return clock;
+    }
+
+    public void validate(Errors errors) {
+        // Uses ErrorsPresentException - an inner class of Errors.
+        // In Java, inner classes can be referenced by simple name from the same package.
+        try {
+            errors.throwIfPresent();
+        } catch (ErrorsPresentException e) {
+            throw new RuntimeException("Validation failed", e);
+        }
     }
 }

@@ -213,6 +213,17 @@ public class ClasspathParser {
         }
       }
 
+      // Track non-private classes (including inner classes) for same-package resolution.
+      // In Java, public, protected, and package-private classes can all be accessed
+      // by simple name from within the same package. This is important for split-package
+      // scenarios where classes in the same Java package are in different Bazel packages.
+      if (!t.getModifiers().getFlags().contains(PRIVATE)) {
+        String fullyQualifiedClass = currentFullyQualifiedClassName();
+        if (fullyQualifiedClass != null) {
+          data.definedClasses.add(fullyQualifiedClass);
+        }
+      }
+
       checkFullyQualifiedType(t.getExtendsClause());
       for (Tree implement : t.getImplementsClause()) {
         checkFullyQualifiedType(implement);
