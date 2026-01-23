@@ -85,6 +85,10 @@ public class ClasspathParser {
     return ImmutableSet.copyOf(data.mainClasses);
   }
 
+  public ImmutableSet<String> getSamePackageTypeReferences() {
+    return ImmutableSet.copyOf(data.samePackageTypeReferences);
+  }
+
   public void parseClasses(Path directory, List<String> files) throws IOException {
     StandardJavaFileManager fileManager = compiler.getStandardFileManager(null, null, null);
     List<? extends JavaFileObject> objectFiles =
@@ -136,6 +140,10 @@ public class ClasspathParser {
     // inner-most context (e.g. inner class).
     // Currently tracks classes, so that we can know what outer and inner classes we may be in.
     private final Deque<Tree> stack = new ArrayDeque<>();
+
+    // Type parameters currently in scope (from enclosing classes and methods).
+    // We track these to avoid confusing them with same-package class references.
+    private final Set<String> typeParametersInScope = new TreeSet<>();
 
     @Nullable private Map<String, String> currentFileImports;
 
@@ -195,6 +203,16 @@ public class ClasspathParser {
     @Override
     public Void visitClass(ClassTree t, Void v) {
       stack.addLast(t);
+
+      // Track type parameters declared on this class (e.g., class Foo<T, E>)
+      Set<String> addedTypeParams = new TreeSet<>();
+      for (var typeParam : t.getTypeParameters()) {
+        String name = typeParam.getName().toString();
+        if (typeParametersInScope.add(name)) {
+          addedTypeParams.add(name);
+        }
+      }
+
       checkFullyQualifiedType(t.getExtendsClause());
       for (Tree implement : t.getImplementsClause()) {
         checkFullyQualifiedType(implement);
@@ -210,6 +228,9 @@ public class ClasspathParser {
         }
       }
       Void ret = super.visitClass(t, v);
+
+      // Remove type parameters when leaving this class scope
+      typeParametersInScope.removeAll(addedTypeParams);
       popOrThrow(t);
       return ret;
     }
@@ -217,6 +238,16 @@ public class ClasspathParser {
     @Override
     public Void visitMethod(com.sun.source.tree.MethodTree m, Void v) {
       stack.addLast(m);
+
+      // Track type parameters declared on this method (e.g., <T> T foo())
+      Set<String> addedTypeParams = new TreeSet<>();
+      for (var typeParam : m.getTypeParameters()) {
+        String name = typeParam.getName().toString();
+        if (typeParametersInScope.add(name)) {
+          addedTypeParams.add(name);
+        }
+      }
+
       boolean isVoidReturn = false;
 
       // Check the return type on the method.
@@ -269,6 +300,9 @@ public class ClasspathParser {
       }
 
       Void ret = super.visitMethod(m, v);
+
+      // Remove type parameters when leaving this method scope
+      typeParametersInScope.removeAll(addedTypeParams);
       popOrThrow(m);
       return ret;
     }
@@ -301,15 +335,148 @@ public class ClasspathParser {
       if (!Character.isUpperCase(identifier.charAt(0))) {
         return false;
       }
-      // Single-char upper-case may well be a class-name.
-      if (identifier.length() == 1) {
-        return true;
-      }
       // SNAKE_CASE is for constants not classes.
-      if (identifier.chars().allMatch(c -> Character.isUpperCase(c) || c == '_')) {
+      if (identifier.length() > 1
+          && identifier.chars().allMatch(c -> Character.isUpperCase(c) || c == '_')) {
         return false;
       }
       return true;
+    }
+
+    /**
+     * All public types in java.lang that are implicitly imported in every Java file. Generated from
+     * JDK documentation. We use a Set for O(1) lookup.
+     */
+    private static final Set<String> JAVA_LANG_TYPES =
+        Set.of(
+            // Interfaces
+            "Appendable",
+            "AutoCloseable",
+            "CharSequence",
+            "Cloneable",
+            "Comparable",
+            "Iterable",
+            "ProcessHandle",
+            "Readable",
+            "Runnable",
+            "StackWalker.StackFrame",
+            "System.Logger",
+            "Thread.UncaughtExceptionHandler",
+            // Classes
+            "Boolean",
+            "Byte",
+            "Character",
+            "Character.Subset",
+            "Character.UnicodeBlock",
+            "Class",
+            "ClassLoader",
+            "ClassValue",
+            "Compiler",
+            "Double",
+            "Enum",
+            "Enum.EnumDesc",
+            "Float",
+            "InheritableThreadLocal",
+            "Integer",
+            "Long",
+            "Math",
+            "Module",
+            "ModuleLayer",
+            "ModuleLayer.Controller",
+            "Number",
+            "Object",
+            "Package",
+            "Process",
+            "ProcessBuilder",
+            "ProcessBuilder.Redirect",
+            "Record",
+            "Runtime",
+            "Runtime.Version",
+            "RuntimePermission",
+            "SecurityManager",
+            "Short",
+            "StackTraceElement",
+            "StackWalker",
+            "StrictMath",
+            "String",
+            "StringBuffer",
+            "StringBuilder",
+            "System",
+            "System.LoggerFinder",
+            "Thread",
+            "ThreadGroup",
+            "ThreadLocal",
+            "Throwable",
+            "Void",
+            // Enums
+            "Character.UnicodeScript",
+            "ProcessBuilder.Redirect.Type",
+            "StackWalker.Option",
+            "System.Logger.Level",
+            "Thread.State",
+            // Exceptions
+            "ArithmeticException",
+            "ArrayIndexOutOfBoundsException",
+            "ArrayStoreException",
+            "ClassCastException",
+            "ClassNotFoundException",
+            "CloneNotSupportedException",
+            "EnumConstantNotPresentException",
+            "Exception",
+            "IllegalAccessException",
+            "IllegalArgumentException",
+            "IllegalCallerException",
+            "IllegalMonitorStateException",
+            "IllegalStateException",
+            "IllegalThreadStateException",
+            "IndexOutOfBoundsException",
+            "InstantiationException",
+            "InterruptedException",
+            "LayerInstantiationException",
+            "NegativeArraySizeException",
+            "NoSuchFieldException",
+            "NoSuchMethodException",
+            "NullPointerException",
+            "NumberFormatException",
+            "ReflectiveOperationException",
+            "RuntimeException",
+            "SecurityException",
+            "StringIndexOutOfBoundsException",
+            "TypeNotPresentException",
+            "UnsupportedOperationException",
+            // Errors
+            "AbstractMethodError",
+            "AssertionError",
+            "BootstrapMethodError",
+            "ClassCircularityError",
+            "ClassFormatError",
+            "Error",
+            "ExceptionInInitializerError",
+            "IllegalAccessError",
+            "IncompatibleClassChangeError",
+            "InstantiationError",
+            "InternalError",
+            "LinkageError",
+            "NoClassDefFoundError",
+            "NoSuchFieldError",
+            "NoSuchMethodError",
+            "OutOfMemoryError",
+            "StackOverflowError",
+            "ThreadDeath",
+            "UnknownError",
+            "UnsatisfiedLinkError",
+            "UnsupportedClassVersionError",
+            "VerifyError",
+            "VirtualMachineError",
+            // Annotations
+            "Deprecated",
+            "FunctionalInterface",
+            "Override",
+            "SafeVarargs",
+            "SuppressWarnings");
+
+    private boolean isJavaLangType(String typeName) {
+      return JAVA_LANG_TYPES.contains(typeName);
     }
 
     @Override
@@ -360,6 +527,16 @@ public class ClasspathParser {
         } else if (components.size() > 1) {
           data.usedTypes.add(typeName);
           types.add(typeName);
+        } else if (components.size() == 1
+            && looksLikeClassName(typeName)
+            && !isJavaLangType(typeName)
+            && !typeParametersInScope.contains(typeName)) {
+          // Simple identifier in a type context that looks like a class name.
+          // This is likely a same-package type reference (Java doesn't require imports
+          // for classes in the same package). Track it separately so the resolver can
+          // combine it with the current package name.
+          // We exclude java.lang types (implicitly imported) and type parameters in scope.
+          data.samePackageTypeReferences.add(typeName);
         }
       } else if (identifier.getKind() == Tree.Kind.PARAMETERIZED_TYPE) {
         Tree baseType = ((ParameterizedTypeTree) identifier).getType();

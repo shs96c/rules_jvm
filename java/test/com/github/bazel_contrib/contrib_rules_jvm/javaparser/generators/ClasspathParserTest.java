@@ -390,6 +390,50 @@ public class ClasspathParserTest {
     assertEquals(expected, parser.getExportedTypes());
   }
 
+  @Test
+  public void testSamePackageTypeReferences() throws IOException {
+    // Test that simple type references (not imported, not fully qualified) are tracked
+    // as same-package type references. This is important for split-package scenarios
+    // where classes in the same Java package are in different Bazel packages.
+    String source =
+        """
+        package com.example.time;
+
+        public class FakeClockModule {
+            private final Clock clock;
+            private final FakeClock fakeClock;
+
+            public FakeClockModule() {
+                this.fakeClock = new FakeClock();
+                this.clock = fakeClock;
+            }
+        }
+        """;
+
+    parser.parseClasses(List.of(new StringJavaSource("FakeClockModule.java", source)));
+
+    // Clock and FakeClock should be tracked as same-package type references
+    // since they're not imported and not fully qualified
+    assertEquals(Set.of("Clock", "FakeClock"), parser.getSamePackageTypeReferences());
+
+    // They should NOT appear in usedTypes since they're not imported or fully qualified
+    assertEquals(Set.of(), parser.getUsedTypes());
+  }
+
+  static class StringJavaSource extends SimpleJavaFileObject {
+    private final String source;
+
+    StringJavaSource(String name, String source) {
+      super(java.nio.file.Path.of("/" + name).toUri(), Kind.SOURCE);
+      this.source = source;
+    }
+
+    @Override
+    public CharSequence getCharContent(boolean ignoreEncodingErrors) {
+      return source;
+    }
+  }
+
   private <T> TreeSet<T> treeSet(T... values) {
     return new TreeSet<>(Arrays.asList(values));
   }

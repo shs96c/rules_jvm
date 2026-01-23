@@ -114,6 +114,15 @@ func (r Runner) ParsePackage(ctx context.Context, in *ParsePackageRequest) (*jav
 		}
 		importedClasses.Add(*className)
 	}
+	// Add same-package type references as fully qualified class names.
+	// These are simple type names (e.g., "Clock") that Java doesn't require imports for
+	// because they're in the same package as the referencing class.
+	for _, simpleTypeName := range resp.GetSamePackageTypeReferences() {
+		if packageName.Name != "" {
+			className := types.NewClassName(packageName, simpleTypeName)
+			importedClasses.Add(className)
+		}
+	}
 	exportedClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 	for _, export := range resp.GetExportedClasses() {
 		className, err := types.ParseClassName(export)
