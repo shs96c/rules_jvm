@@ -536,6 +536,16 @@ public class ClasspathParser {
           data.usedTypes.add(importedType);
           types.add(importedType);
         } else if (components.size() > 1) {
+          // Check if the first component looks like a class name (starts with uppercase).
+          // If so, it might be a same-package class with an inner class reference like
+          // "RpcProtos.ResponseCode" where RpcProtos is a class in the same package.
+          String firstComponent = components.get(0);
+          if (looksLikeClassName(firstComponent)
+              && !isJavaLangType(firstComponent)
+              && !typeParametersInScope.contains(firstComponent)) {
+            // Track the outer class as a same-package reference
+            data.samePackageTypeReferences.add(firstComponent);
+          }
           data.usedTypes.add(typeName);
           types.add(typeName);
         } else if (components.size() == 1
