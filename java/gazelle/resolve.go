@@ -182,7 +182,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 		}
 
 		// Try package-level resolution first (fast path)
-		dep, ambiguous := jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
+		dep, ambiguous, providers := jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
 		if dep != label.NoLabel {
 			labels.Add(simplifyLabel(c.RepoName, dep, from))
 			continue
@@ -193,6 +193,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 			jr.lang.logger.Debug().
 				Str("package", imp.Name).
 				Strs("classes", pkgClasses).
+				Strs("providers", providers).
 				Stringer("from", from).
 				Msg("package has multiple providers, attempting class-level resolution")
 
@@ -216,6 +217,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 				jr.lang.logger.Error().
 					Str("package", imp.Name).
 					Strs("classes", pkgClasses).
+					Strs("providers", providers).
 					Stringer("from", from).
 					Msg("package has multiple providers and class-level resolution failed for all classes")
 				jr.lang.hasHadErrors = true
@@ -298,11 +300,11 @@ func setLabelAttrIncludingExistingValues(r *rule.Rule, attrName string, labels *
 
 // resolveSinglePackageWithAmbiguity resolves a package import and returns whether there was ambiguity.
 // When ambiguous is true and out is NoLabel, the caller should attempt class-level resolution.
-func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string) (out label.Label, ambiguous bool) {
+func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string) (out label.Label, ambiguous bool, providers []string) {
 	cacheKey := types.NewResolvableJavaPackage(imp, false, false)
 	importSpec := resolve.ImportSpec{Lang: languageName, Imp: cacheKey.String()}
 	if ol, found := resolve.FindRuleWithOverride(c, importSpec, languageName); found {
-		return ol, false
+		return ol, false, nil
 	}
 
 	matches := ix.FindRulesByImportWithConfig(c, importSpec, languageName)
@@ -320,16 +322,20 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 	}
 
 	if len(matches) == 1 {
-		return matches[0].Label, false
+		return matches[0].Label, false, nil
 	}
 
 	if len(matches) > 1 {
 		// Multiple matches found - signal ambiguity so caller can try class-level resolution
-		return label.NoLabel, true
+		providerLabels := make([]string, len(matches))
+		for i, m := range matches {
+			providerLabels[i] = m.Label.String()
+		}
+		return label.NoLabel, true, providerLabels
 	}
 
 	if v, ok := jr.internalCache.Get(cacheKey); ok {
-		return simplifyLabel(c.RepoName, v.(label.Label), from), false
+		return simplifyLabel(c.RepoName, v.(label.Label), from), false, nil
 	}
 
 	jr.lang.logger.Debug().Str("parsedImport", imp.Name).Stringer("from", from).Msg("not found yet")
@@ -341,10 +347,10 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 	}()
 
 	if java.IsStdlib(imp) {
-		return label.NoLabel, false
+		return label.NoLabel, false, nil
 	}
 	if kotlin.IsStdlib(imp) {
-		return label.NoLabel, false
+		return label.NoLabel, false, nil
 	}
 
 	// As per https://github.com/bazelbuild/bazel/blob/347407a88fd480fc5e0fbd42cc8196e4356a690b/tools/java/runfiles/Runfiles.java#L41
@@ -353,9 +359,9 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 		l, err := label.Parse(runfilesLabel)
 		if err != nil {
 			jr.lang.logger.Fatal().Str("label", runfilesLabel).Err(err).Msg("failed to parse known-good runfiles label")
-			return label.NoLabel, false
+			return label.NoLabel, false, nil
 		}
-		return l, false
+		return l, false, nil
 	}
 
 	if l, err := jr.lang.mavenResolver.Resolve(imp, pc.ExcludedArtifacts(), pc.MavenRepositoryName()); err != nil {
@@ -385,7 +391,7 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 			jr.lang.logger.Fatal().Err(err).Msg("maven resolver error")
 		}
 	} else {
-		return l, false
+		return l, false, nil
 	}
 
 	if isTestRule {
@@ -395,7 +401,7 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 		testonlyMatches := ix.FindRulesByImportWithConfig(c, testonlyImportSpec, languageName)
 		if len(testonlyMatches) == 1 {
 			cacheKey = testonlyCacheKey
-			return simplifyLabel(c.RepoName, testonlyMatches[0].Label, from), false
+			return simplifyLabel(c.RepoName, testonlyMatches[0].Label, from), false, nil
 		}
 
 		// If there's exactly one testsuite match, use it
@@ -407,14 +413,14 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 			l := testsuiteMatches[0].Label
 			if l != from {
 				l.Name += "-test-lib"
-				return simplifyLabel(c.RepoName, l, from), false
+				return simplifyLabel(c.RepoName, l, from), false, nil
 			}
 		}
 	}
 
 	if isTestRule && ownPackageNames.Contains(imp) {
 		// Tests may have unique packages which don't exist outside of those tests - don't treat this as an error.
-		return label.NoLabel, false
+		return label.NoLabel, false, nil
 	}
 
 	jr.lang.logger.Warn().
@@ -424,11 +430,11 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 		Msg("Unable to find package for import in any dependency")
 	jr.lang.hasHadErrors = true
 
-	return label.NoLabel, false
+	return label.NoLabel, false, nil
 }
 
 func (jr *Resolver) resolveSinglePackage(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string) (out label.Label) {
-	out, _ = jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
+	out, _, _ = jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
 	return out
 }
 
