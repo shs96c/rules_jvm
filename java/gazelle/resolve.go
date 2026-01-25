@@ -377,7 +377,7 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 				for _, className := range pkgClasses {
 					cls := types.NewClassName(imp, className)
 					if resolved, _ := jr.lang.mavenResolver.ResolveClass(cls, pc.ExcludedArtifacts(), pc.MavenRepositoryName()); resolved != label.NoLabel {
-						return label.NoLabel, true
+						return label.NoLabel, true, multipleExternal.PossiblePackages
 					}
 				}
 			}
