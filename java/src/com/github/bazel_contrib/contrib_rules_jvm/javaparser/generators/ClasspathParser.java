@@ -145,6 +145,14 @@ public class ClasspathParser {
     // We track these to avoid confusing them with same-package class references.
     private final Set<String> typeParametersInScope = new TreeSet<>();
 
+    // All simple class names defined in the current file (including private inner classes).
+    // Used to filter out same-package references that are actually local to this file.
+    private Set<String> classNamesInCurrentFile = new TreeSet<>();
+
+    // Same-package type references found in the current file. We collect these separately
+    // and filter them at the end of the file to handle forward references to inner classes.
+    private Set<String> currentFileSamePackageRefs = new TreeSet<>();
+
     @Nullable private Map<String, String> currentFileImports;
 
     void popOrThrow(Tree expected) {
@@ -160,8 +168,20 @@ public class ClasspathParser {
       compileUnit = t;
       fileName = Paths.get(compileUnit.getSourceFile().toUri()).getFileName().toString();
       currentFileImports = new HashMap<>();
+      classNamesInCurrentFile = new TreeSet<>();
+      currentFileSamePackageRefs = new TreeSet<>();
 
-      return super.visitCompilationUnit(t, v);
+      Void result = super.visitCompilationUnit(t, v);
+
+      // After processing the file, add same-package references that are NOT defined in
+      // this file. This filters out references to private inner classes within the same file.
+      for (String ref : currentFileSamePackageRefs) {
+        if (!classNamesInCurrentFile.contains(ref)) {
+          data.samePackageTypeReferences.add(ref);
+        }
+      }
+
+      return result;
     }
 
     @Override
@@ -211,6 +231,13 @@ public class ClasspathParser {
         if (typeParametersInScope.add(name)) {
           addedTypeParams.add(name);
         }
+      }
+
+      // Track all class names in current file (including private) so we can filter
+      // same-package references that are actually local to this file.
+      String simpleName = t.getSimpleName().toString();
+      if (!simpleName.isEmpty()) {
+        classNamesInCurrentFile.add(simpleName);
       }
 
       // Track non-private classes (including inner classes) for same-package resolution.
@@ -336,6 +363,28 @@ public class ClasspathParser {
         }
       }
       return super.visitMethodInvocation(node, v);
+    }
+
+    @Override
+    public Void visitMemberSelect(MemberSelectTree node, Void v) {
+      // Handle class literals like "Foo.class" which appear as MemberSelectTree
+      // with identifier "class" and expression being the class name.
+      if ("class".equals(node.getIdentifier().toString())) {
+        ExpressionTree expr = node.getExpression();
+        if (expr.getKind() == Tree.Kind.IDENTIFIER) {
+          String className = expr.toString();
+          if (looksLikeClassName(className)
+              && !isJavaLangType(className)
+              && !typeParametersInScope.contains(className)) {
+            // This is a class literal like "Foo.class" - treat as same-package reference
+            currentFileSamePackageRefs.add(className);
+          }
+        } else if (expr.getKind() == Tree.Kind.MEMBER_SELECT) {
+          // Fully qualified like "com.example.Foo.class"
+          checkFullyQualifiedType(expr);
+        }
+      }
+      return super.visitMemberSelect(node, v);
     }
 
     private boolean looksLikeClassName(String identifier) {
@@ -543,8 +592,9 @@ public class ClasspathParser {
           if (looksLikeClassName(firstComponent)
               && !isJavaLangType(firstComponent)
               && !typeParametersInScope.contains(firstComponent)) {
-            // Track the outer class as a same-package reference
-            data.samePackageTypeReferences.add(firstComponent);
+            // Track the outer class as a potential same-package reference.
+            // We'll filter out classes defined in this file at the end of the file.
+            currentFileSamePackageRefs.add(firstComponent);
           }
           data.usedTypes.add(typeName);
           types.add(typeName);
@@ -557,7 +607,8 @@ public class ClasspathParser {
           // for classes in the same package). Track it separately so the resolver can
           // combine it with the current package name.
           // We exclude java.lang types (implicitly imported) and type parameters in scope.
-          data.samePackageTypeReferences.add(typeName);
+          // Classes defined in this file will be filtered at the end of visitCompilationUnit.
+          currentFileSamePackageRefs.add(typeName);
         }
       } else if (identifier.getKind() == Tree.Kind.PARAMETERIZED_TYPE) {
         Tree baseType = ((ParameterizedTypeTree) identifier).getType();

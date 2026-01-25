@@ -420,6 +420,98 @@ public class ClasspathParserTest {
     assertEquals(Set.of(), parser.getUsedTypes());
   }
 
+  @Test
+  public void testClassLiteralAsMethodArgument() throws IOException {
+    // Test that class literals like "Foo.class" used as method arguments are detected
+    // as same-package type references
+    String source =
+        """
+        package com.example.uninterruptibles;
+
+        import java.lang.reflect.Method;
+
+        public class UninterruptibleListener {
+            public void check(Method method) {
+                if (method.isAnnotationPresent(Uninterruptible.class)) {
+                    System.out.println("found");
+                }
+            }
+        }
+        """;
+
+    parser.parseClasses(List.of(new StringJavaSource("UninterruptibleListener.java", source)));
+
+    // Uninterruptible should be tracked as a same-package type reference
+    // because it's used as a class literal without being imported
+    assertEquals(Set.of("Uninterruptible"), parser.getSamePackageTypeReferences());
+  }
+
+  @Test
+  public void testPrivateInnerClassNotInSamePackageReferences() throws IOException {
+    // Test that private inner classes defined in the same file are NOT included
+    // in samePackageTypeReferences, as they are local to the file
+    String source =
+        """
+        package com.example.uninterruptibles;
+
+        public class UninterruptibleListener {
+            public void run() {
+                InvokeWithExceptionHandling handler = new InvokeWithExceptionHandling();
+                handler.run();
+            }
+
+            private static class InvokeWithExceptionHandling implements Runnable {
+                @Override
+                public void run() {}
+            }
+
+            private static class UninterruptibleInterceptor {
+                void intercept() {}
+            }
+        }
+        """;
+
+    parser.parseClasses(List.of(new StringJavaSource("UninterruptibleListener.java", source)));
+
+    // InvokeWithExceptionHandling should NOT be in samePackageTypeReferences
+    // because it's a private inner class defined in the same file
+    assertEquals(Set.of(), parser.getSamePackageTypeReferences());
+  }
+
+  @Test
+  public void testMixedSamePackageRefsAndPrivateInnerClasses() throws IOException {
+    // Test that external same-package references are detected while private inner
+    // classes are correctly filtered out
+    String source =
+        """
+        package com.example.uninterruptibles;
+
+        import java.lang.reflect.Method;
+
+        public class UninterruptibleListener {
+            public void check(Method method) {
+                // External class literal - should be detected
+                if (method.isAnnotationPresent(Uninterruptible.class)) {
+                    // Private inner class - should NOT be in samePackageTypeReferences
+                    InvokeWithExceptionHandling handler = new InvokeWithExceptionHandling();
+                    handler.run();
+                }
+            }
+
+            private static class InvokeWithExceptionHandling implements Runnable {
+                @Override
+                public void run() {}
+            }
+        }
+        """;
+
+    parser.parseClasses(List.of(new StringJavaSource("UninterruptibleListener.java", source)));
+
+    // Uninterruptible should be detected (external class literal)
+    // InvokeWithExceptionHandling should NOT be included (private inner class in same file)
+    assertEquals(Set.of("Uninterruptible"), parser.getSamePackageTypeReferences());
+  }
+
   static class StringJavaSource extends SimpleJavaFileObject {
     private final String source;
 
