@@ -209,6 +209,15 @@ public class ClasspathParser {
       if (i.isStatic()) {
         String staticPackage = name.substring(0, name.lastIndexOf('.'));
         data.usedTypes.add(staticPackage);
+        // For static imports, also track the imported name so that if it's used as a type
+        // (e.g., "import static com.foo.Outer.InnerClass;" where InnerClass is a nested class),
+        // we won't incorrectly treat it as a same-package reference.
+        String importedName = name.substring(name.lastIndexOf('.') + 1);
+        // Only track if it looks like a class name (starts with uppercase) - this filters out
+        // static method/field imports like "import static org.junit.Assert.assertEquals"
+        if (looksLikeClassName(importedName)) {
+          currentFileImports.put(importedName, name);
+        }
       } else if (name.endsWith(".*")) {
         String wildcardPackage = name.substring(0, name.lastIndexOf('.'));
         data.usedPackagesWithoutSpecificTypes.add(wildcardPackage);
@@ -373,7 +382,10 @@ public class ClasspathParser {
         ExpressionTree expr = node.getExpression();
         if (expr.getKind() == Tree.Kind.IDENTIFIER) {
           String className = expr.toString();
-          if (looksLikeClassName(className)
+          // First check if the type is explicitly imported - if so, add to usedTypes
+          if (currentFileImports.containsKey(className)) {
+            data.usedTypes.add(currentFileImports.get(className));
+          } else if (looksLikeClassName(className)
               && !isJavaLangType(className)
               && !typeParametersInScope.contains(className)) {
             // This is a class literal like "Foo.class" - treat as same-package reference

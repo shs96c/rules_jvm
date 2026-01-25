@@ -1,6 +1,7 @@
 package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.IOException;
@@ -510,6 +511,136 @@ public class ClasspathParserTest {
     // Uninterruptible should be detected (external class literal)
     // InvokeWithExceptionHandling should NOT be included (private inner class in same file)
     assertEquals(Set.of("Uninterruptible"), parser.getSamePackageTypeReferences());
+  }
+
+  @Test
+  public void testImportedClassLiteralNotInSamePackageReferences() throws IOException {
+    // Test that class literals for explicitly imported types are NOT treated as
+    // same-package references. This is a regression test for a bug where
+    // "BiFunction.class" would be added to samePackageTypeReferences even though
+    // BiFunction was explicitly imported.
+    String source =
+        """
+        package com.example.service;
+
+        import java.util.function.BiFunction;
+        import com.google.protobuf.Message;
+
+        public class ServiceReflection {
+            public void findMethod(Class<?> serviceType) {
+                findStaticMethod(serviceType, "newApi",
+                    BiFunction.class,
+                    BiFunction.class,
+                    Message.class);
+            }
+
+            private void findStaticMethod(Class<?> type, String name, Class<?>... params) {}
+        }
+        """;
+
+    parser.parseClasses(List.of(new StringJavaSource("ServiceReflection.java", source)));
+
+    // BiFunction and Message should NOT be in samePackageTypeReferences
+    // because they are explicitly imported
+    assertEquals(Set.of(), parser.getSamePackageTypeReferences());
+
+    // They should be in usedTypes instead
+    assertEquals(
+        Set.of("java.util.function.BiFunction", "com.google.protobuf.Message"),
+        parser.getUsedTypes());
+  }
+
+  @Test
+  public void testStaticTypeImportNotInSamePackageReferences() throws IOException {
+    // Test that types imported via static import are NOT treated as same-package
+    // references when used. This is a regression test for a bug where
+    // "import static com.foo.Descriptors.ServiceDescriptor;" would not track
+    // ServiceDescriptor, causing it to be misclassified as a same-package reference.
+    String source =
+        """
+        package com.example.service;
+
+        import static com.google.protobuf.Descriptors.ServiceDescriptor;
+
+        public class ServiceReflection {
+            private ServiceDescriptor descriptor;
+
+            public ServiceDescriptor getDescriptor() {
+                return descriptor;
+            }
+        }
+        """;
+
+    parser.parseClasses(List.of(new StringJavaSource("ServiceReflection.java", source)));
+
+    // ServiceDescriptor should NOT be in samePackageTypeReferences
+    // because it is imported via static import
+    assertEquals(Set.of(), parser.getSamePackageTypeReferences());
+
+    // The containing class should be in usedTypes (for the static import)
+    // and ServiceDescriptor itself should also be tracked
+    assertTrue(parser.getUsedTypes().contains("com.google.protobuf.Descriptors"));
+  }
+
+  @Test
+  public void testStaticMethodImportDoesNotAffectTypeResolution() throws IOException {
+    // Test that static method imports (which are lowercase) don't interfere with
+    // type resolution. Only static type imports (uppercase) should be tracked.
+    String source =
+        """
+        package com.example.test;
+
+        import static org.junit.Assert.assertEquals;
+        import static com.google.common.base.Preconditions.checkNotNull;
+
+        public class MyTest {
+            public void test() {
+                assertEquals(1, 1);
+                checkNotNull(new Object());
+                // This should be a same-package reference since it's not imported
+                SomeHelper helper = new SomeHelper();
+            }
+        }
+        """;
+
+    parser.parseClasses(List.of(new StringJavaSource("MyTest.java", source)));
+
+    // SomeHelper should be in samePackageTypeReferences (not imported)
+    assertEquals(Set.of("SomeHelper"), parser.getSamePackageTypeReferences());
+
+    // Static method imports should still be tracked in usedTypes
+    assertTrue(parser.getUsedTypes().contains("org.junit.Assert"));
+    assertTrue(parser.getUsedTypes().contains("com.google.common.base.Preconditions"));
+  }
+
+  @Test
+  public void testMixedClassLiteralsImportedAndNot() throws IOException {
+    // Test a mix of class literals - some imported, some not
+    String source =
+        """
+        package com.example.service;
+
+        import java.util.function.BiFunction;
+
+        public class ServiceReflection {
+            public void findMethod(Class<?> serviceType) {
+                // BiFunction is imported - should NOT be in samePackageTypeReferences
+                findMethod(serviceType, BiFunction.class);
+                // Uninterruptible is NOT imported - should be in samePackageTypeReferences
+                findMethod(serviceType, Uninterruptible.class);
+            }
+
+            private void findMethod(Class<?> type, Class<?> param) {}
+        }
+        """;
+
+    parser.parseClasses(List.of(new StringJavaSource("ServiceReflection.java", source)));
+
+    // Only Uninterruptible should be in samePackageTypeReferences
+    assertEquals(Set.of("Uninterruptible"), parser.getSamePackageTypeReferences());
+
+    // BiFunction should be in usedTypes
+    assertEquals(Set.of("java.util.function.BiFunction"), parser.getUsedTypes());
   }
 
   static class StringJavaSource extends SimpleJavaFileObject {
