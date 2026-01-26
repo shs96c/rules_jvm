@@ -30,8 +30,8 @@ class ParsedPackageData {
 
   /**
    * Fully qualified names of all public classes defined in this package, including inner classes.
-   * For example, for a file containing `public class Outer { public static class Inner {} }`,
-   * this would contain both "com.example.Outer" and "com.example.Outer.Inner".
+   * For example, for a file containing `public class Outer { public static class Inner {} }`, this
+   * would contain both "com.example.Outer" and "com.example.Outer.Inner".
    */
   final Set<String> definedClasses = new TreeSet<>();
 
