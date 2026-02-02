@@ -673,7 +673,16 @@ func (jr *Resolver) tryResolvingToJavaExport(results []resolve.FindResult, from 
 }
 
 func isJvmLibrary(c *config.Config, kind string) bool {
-	return isJavaLibrary(c, kind) || isKotlinLibrary(kind)
+	if isJavaLibrary(c, kind) || isKotlinLibrary(kind) {
+		return true
+	}
+	// Check for kinds registered by other plugins via the extension mechanism
+	if extKinds, ok := c.Exts[javaconfig.JavaExtensionLibraryKindsKey].(map[string]bool); ok {
+		if extKinds[kind] {
+			return true
+		}
+	}
+	return false
 }
 
 func isJavaLibrary(c *config.Config, kind string) bool {
