@@ -1,0 +1,37 @@
+load("@bazel_gazelle//:def.bzl", "gazelle_binary", "gazelle_generation_test")
+
+# Integration test that exercises the cross-plugin OtherGen contract.
+#
+# The fake_java_provider plugin (registered FIRST, so its rules show up in
+# args.OtherGen when the Java plugin runs) emits a fake_java_provider rule for
+# any directory containing a `provided_java.txt` marker file, with
+# java_provided_classes / java_provided_packages private attributes attached.
+# The Java plugin's GenerateRules pass scrapes those attributes and routes
+# Java imports of the advertised classes to the producing target.
+#
+# Layout note (mirrors java/gazelle/testdata/BUILD.bazel): the test data must
+# not contain any nested BUILD.bazel files, otherwise glob() will not reach
+# inside.
+
+# gazelle:exclude *
+
+gazelle_binary(
+    name = "gazelle_with_otherprovider",
+    languages = [
+        "//java/gazelle/private/otherprovidertest",
+        "//java/gazelle",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+gazelle_generation_test(
+    name = "other_gen_provider",
+    env = {
+        "GAZELLE_JAVA_LOG_CALLER": "false",
+        "GAZELLE_JAVA_LOG_FORMAT": "json",
+        "GAZELLE_JAVA_LOG_TIMESTAMP": "false",
+    },
+    gazelle_binary = ":gazelle_with_otherprovider",
+    gazelle_timeout_seconds = 60,
+    test_data = glob(["example/**"]),
+)

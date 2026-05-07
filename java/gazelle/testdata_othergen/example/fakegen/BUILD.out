@@ -1,0 +1,3 @@
+load("@fake_java_provider//:rules.bzl", "fake_java_provider")
+
+fake_java_provider(name = "fake_provider")

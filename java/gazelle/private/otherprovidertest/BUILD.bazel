@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "otherprovidertest",
+    srcs = ["lang.go"],
+    importpath = "github.com/bazel-contrib/rules_jvm/java/gazelle/private/otherprovidertest",
+    visibility = ["//java/gazelle:__subpackages__"],
+    deps = [
+        "@bazel_gazelle//config",
+        "@bazel_gazelle//label",
+        "@bazel_gazelle//language",
+        "@bazel_gazelle//repo",
+        "@bazel_gazelle//resolve",
+        "@bazel_gazelle//rule",
+    ],
+)

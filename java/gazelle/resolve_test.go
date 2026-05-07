@@ -542,3 +542,74 @@ java_library(
 		t.Errorf("SawmillRawHttpRequest should be provided by sawmill_raw_http_request_java_library, got %s", pci.prod["SawmillRawHttpRequest"][0])
 	}
 }
+
+// TestResolveUsesOtherGenPackageIndex verifies that imports of a package
+// advertised by an upstream Gazelle plugin (via the OtherGen private-attribute
+// contract) resolve to the producing label, even though that label is not
+// registered in Gazelle's RuleIndex.
+func TestResolveUsesOtherGenPackageIndex(t *testing.T) {
+	c, langs, _ := testConfig(t)
+
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	rc := testRemoteCache(nil)
+
+	var javaLangInstance *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			javaLangInstance = jl
+			break
+		}
+	}
+	if javaLangInstance == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+
+	// Simulate that an upstream plugin (e.g. rules_wire) generated //wire:user
+	// and advertised it as the provider of the com.example.user package.
+	wireLabel := label.New("", "wire", "user")
+	javaLangInstance.otherGenPackageIndex[types.NewPackageName("com.example.user")] = []label.Label{wireLabel}
+
+	pkgRel := ""
+	buildContent := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "consumer",
+    srcs = ["Consumer.java"],
+    _imported_packages = ["com.example.user"],
+    _packages = ["com.consumer"],
+    visibility = ["//:__subpackages__"],
+)`
+	buildPath := filepath.Join(filepath.FromSlash(pkgRel), "BUILD.bazel")
+	f, err := rule.LoadData(buildPath, pkgRel, []byte(buildContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	imports := make([]interface{}, len(f.Rules))
+	for i, r := range f.Rules {
+		imports[i] = convertImportsAttr(r)
+		ix.AddRule(c, r, f)
+	}
+	ix.Finish()
+
+	for i, r := range f.Rules {
+		mrslv.Resolver(r, "").Resolve(c, ix, rc, r, imports[i], label.New("", pkgRel, r.Name()))
+	}
+	f.Sync()
+
+	got := strings.TrimSpace(string(bzl.Format(f.File)))
+	want := strings.TrimSpace(`load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "consumer",
+    srcs = ["Consumer.java"],
+    visibility = ["//:__subpackages__"],
+    deps = ["//wire:user"],
+)`)
+	if got != want {
+		dmp := diffmatchpatch.New()
+		diffs := dmp.DiffMain(want, got, true)
+		t.Errorf("Resolve via OtherGen index:\n%s", dmp.DiffPrettyText(diffs))
+	}
+}

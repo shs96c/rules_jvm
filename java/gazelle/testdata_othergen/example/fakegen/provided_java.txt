@@ -1,0 +1,3 @@
+# Classes that this directory's rule advertises via the OtherGen contract.
+com.fakegen.User
+com.fakegen.UserMeta

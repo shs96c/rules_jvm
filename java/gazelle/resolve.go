@@ -356,6 +356,13 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 		matches = nonExportMatches
 	}
 
+	// Fold in matches advertised by upstream Gazelle plugins via the OtherGen
+	// private-attribute contract. These rules are not in Gazelle's RuleIndex
+	// because we cannot register them through our own Imports() callback.
+	for _, otherGenLabel := range jr.lang.otherGenPackageIndex[imp] {
+		matches = append(matches, resolve.FindResult{Label: otherGenLabel})
+	}
+
 	if len(matches) == 1 {
 		return matches[0].Label, false
 	}
@@ -486,6 +493,14 @@ func (jr *Resolver) buildPackageClassIndex(c *config.Config, pkg types.PackageNa
 	testImportSpec := resolve.ImportSpec{Lang: languageName, Imp: testCacheKey.String()}
 	testMatches := ix.FindRulesByImportWithConfig(c, testImportSpec, languageName)
 	matches = append(matches, testMatches...)
+
+	// Include providers advertised by upstream Gazelle plugins via the OtherGen
+	// private-attribute contract. Their per-rule classes are stored in
+	// classExportCache by indexOtherGenJavaSymbols, so the loop below picks them
+	// up the same way it picks up native java rules.
+	for _, otherGenLabel := range jr.lang.otherGenPackageIndex[pkg] {
+		matches = append(matches, resolve.FindResult{Label: otherGenLabel})
+	}
 
 	pci := &packageClassIndex{
 		prod: make(map[string][]label.Label),

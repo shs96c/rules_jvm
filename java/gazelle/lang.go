@@ -13,6 +13,7 @@ import (
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_multiset"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 	"github.com/bazelbuild/bazel-gazelle/config"
+	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
@@ -41,6 +42,14 @@ type javaLang struct {
 	// Used for class-level resolution when package resolution is ambiguous.
 	// Key is the stringified label (e.g., "//pkg:name").
 	classExportCache map[string]classExportInfo
+
+	// otherGenPackageIndex maps Java package names to the labels of rules — generated
+	// by other Gazelle plugins listed earlier in the gazelle_binary — that advertise
+	// themselves (via the ProvidedPackagesKey private attribute) as providing that
+	// package. Populated incrementally during GenerateRules from args.OtherGen so it
+	// is fully built by the time Resolve runs. Distinct from Gazelle's RuleIndex
+	// because we cannot register OtherGen rules through our own Imports() callback.
+	otherGenPackageIndex map[types.PackageName][]label.Label
 
 	// hasHadErrors triggers the extension to fail at destroy time.
 	//
@@ -78,11 +87,12 @@ func NewLanguage() language.Language {
 	logger.Debug().Msg("creating java language")
 
 	l := javaLang{
-		logger:           logger,
-		javaLogLevel:     javaLevel,
-		javaPackageCache: make(map[string]*java.Package),
-		javaExportIndex:  java_export_index.NewJavaExportIndex(languageName, logger),
-		classExportCache: make(map[string]classExportInfo),
+		logger:               logger,
+		javaLogLevel:         javaLevel,
+		javaPackageCache:     make(map[string]*java.Package),
+		javaExportIndex:      java_export_index.NewJavaExportIndex(languageName, logger),
+		classExportCache:     make(map[string]classExportInfo),
+		otherGenPackageIndex: make(map[types.PackageName][]label.Label),
 	}
 
 	l.logger = l.logger.Hook(shutdownServerOnFatalLogHook{

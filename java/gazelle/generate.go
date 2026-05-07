@@ -62,6 +62,12 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		return res
 	}
 
+	// Scrape rules emitted by upstream Gazelle plugins for advertised Java
+	// symbols. This must happen before any early returns below so the index is
+	// populated even for directories where the Java extension itself emits no
+	// rules.
+	l.indexOtherGenJavaSymbols(args, log)
+
 	if cfg.GenerateProto() {
 		generateProtoLibraries(&l, args, log, &res, cfg)
 	}
@@ -489,6 +495,46 @@ func (l javaLang) collectRuntimeDeps(kind, name string, file *rule.File) *sorted
 	}
 
 	return runtimeDeps
+}
+
+// indexOtherGenJavaSymbols scans args.OtherGen for rules that advertise Java
+// symbols via the standardized ProvidedClassesKey / ProvidedPackagesKey private
+// attributes (see constants.go). Each matching rule's classes and packages are
+// folded into l.classExportCache and l.otherGenPackageIndex so the resolver can
+// route Java imports to it later, without the producing plugin having to depend
+// on contrib_rules_jvm Go code.
+func (l javaLang) indexOtherGenJavaSymbols(args language.GenerateArgs, log zerolog.Logger) {
+	for _, otherRule := range args.OtherGen {
+		ruleLabel := label.New("", args.Rel, otherRule.Name())
+
+		if rawClasses, ok := otherRule.PrivateAttr(ProvidedClassesKey).([]string); ok && len(rawClasses) > 0 {
+			classes := make([]types.ClassName, 0, len(rawClasses))
+			for _, fqn := range rawClasses {
+				cn, err := types.ParseClassName(fqn)
+				if err != nil {
+					log.Warn().Err(err).Str("class", fqn).Stringer("rule", ruleLabel).Msg("ignoring unparseable class name from OtherGen rule")
+					continue
+				}
+				classes = append(classes, *cn)
+			}
+			if len(classes) > 0 {
+				l.classExportCache[ruleLabel.String()] = classExportInfo{
+					classes:  classes,
+					testonly: false,
+				}
+			}
+		}
+
+		if rawPkgs, ok := otherRule.PrivateAttr(ProvidedPackagesKey).([]string); ok {
+			for _, pkg := range rawPkgs {
+				if pkg == "" {
+					continue
+				}
+				pn := types.NewPackageName(pkg)
+				l.otherGenPackageIndex[pn] = append(l.otherGenPackageIndex[pn], ruleLabel)
+			}
+		}
+	}
 }
 
 func generateProtoLibraries(l *javaLang, args language.GenerateArgs, log zerolog.Logger, res *language.GenerateResult, cfg *javaconfig.Config) {

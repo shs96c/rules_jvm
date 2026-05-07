@@ -5,8 +5,10 @@ import (
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
+	"github.com/bazelbuild/bazel-gazelle/label"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
+	"github.com/bazelbuild/bazel-gazelle/rule"
 	bzl "github.com/bazelbuild/buildtools/build"
 	"github.com/google/go-cmp/cmp"
 	"github.com/rs/zerolog"
@@ -355,6 +357,60 @@ func TestSnakeToPascalCase(t *testing.T) {
 			require.Equal(t, tc.want, got)
 		})
 	}
+}
+
+func TestIndexOtherGenJavaSymbols(t *testing.T) {
+	l := newTestJavaLang(t)
+	l.classExportCache = make(map[string]classExportInfo)
+	l.otherGenPackageIndex = make(map[types.PackageName][]label.Label)
+
+	// Rule advertises both classes and packages — the standard "wire-style" case.
+	wireRule := rule.NewRule("wire_java_library", "user")
+	wireRule.SetPrivateAttr(ProvidedClassesKey, []string{"com.example.User", "com.example.UserMeta"})
+	wireRule.SetPrivateAttr(ProvidedPackagesKey, []string{"com.example"})
+
+	// Rule advertises only packages (no class metadata).
+	pkgOnlyRule := rule.NewRule("wire_java_library", "other")
+	pkgOnlyRule.SetPrivateAttr(ProvidedPackagesKey, []string{"com.other", ""})
+
+	// Rule with no relevant private attrs at all — must be ignored.
+	unrelatedRule := rule.NewRule("go_library", "noop")
+
+	args := language.GenerateArgs{
+		Rel:      "src/wire",
+		OtherGen: []*rule.Rule{wireRule, pkgOnlyRule, unrelatedRule},
+	}
+
+	l.indexOtherGenJavaSymbols(args, l.logger)
+
+	wireLabel := label.New("", "src/wire", "user")
+	pkgOnlyLabel := label.New("", "src/wire", "other")
+	unrelatedLabel := label.New("", "src/wire", "noop")
+
+	// classExportCache: wireRule's two classes recorded; pkg-only and unrelated rules absent.
+	wireInfo, ok := l.classExportCache[wireLabel.String()]
+	require.True(t, ok, "expected wireRule to be in classExportCache")
+	require.False(t, wireInfo.testonly)
+	gotFqns := make([]string, 0, len(wireInfo.classes))
+	for _, c := range wireInfo.classes {
+		gotFqns = append(gotFqns, c.FullyQualifiedClassName())
+	}
+	require.ElementsMatch(t, []string{"com.example.User", "com.example.UserMeta"}, gotFqns)
+
+	_, ok = l.classExportCache[pkgOnlyLabel.String()]
+	require.False(t, ok, "rule with no classes must not be in classExportCache")
+	_, ok = l.classExportCache[unrelatedLabel.String()]
+	require.False(t, ok, "unrelated rule must not be in classExportCache")
+
+	// otherGenPackageIndex: both wireRule and pkgOnlyRule contribute; empty pkg skipped.
+	require.ElementsMatch(t,
+		[]label.Label{wireLabel},
+		l.otherGenPackageIndex[types.NewPackageName("com.example")])
+	require.ElementsMatch(t,
+		[]label.Label{pkgOnlyLabel},
+		l.otherGenPackageIndex[types.NewPackageName("com.other")])
+	_, present := l.otherGenPackageIndex[types.NewPackageName("")]
+	require.False(t, present, "empty package strings must be skipped")
 }
 
 func TestProtoOuterClassName(t *testing.T) {
