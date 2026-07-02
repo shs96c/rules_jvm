@@ -254,13 +254,28 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	}
 
 	allPackageNamesSlice := allPackageNames.SortedSlice()
-	nonLocalProductionJavaImports := productionJavaImports.Filter(func(i types.PackageName) bool {
+	isInAllPackageNames := func(name string) bool {
 		for _, n := range allPackageNamesSlice {
-			if i.Name == n.Name {
-				return false
+			if name == n.Name {
+				return true
 			}
 		}
-		return true
+		return false
+	}
+	nonLocalProductionJavaImports := productionJavaImports.Filter(func(i types.PackageName) bool {
+		return !isInAllPackageNames(i.Name)
+	})
+	// Exports from sub-packages can name classes in *other* packages of the same
+	// module (e.g. a Kotlin extension function on a class from a sibling package).
+	// Those were added to nonLocalJavaExports/nonLocalJavaExternalExportedClasses
+	// by `addFilteringOutOwnPackage`, which only knows about the per-file ownPackage,
+	// not the module-wide set of packages. Filter them out here so a module's own
+	// packages don't leak into `exports` at resolve time.
+	nonLocalJavaExports = nonLocalJavaExports.Filter(func(i types.PackageName) bool {
+		return !isInAllPackageNames(i.Name)
+	})
+	nonLocalJavaExternalExportedClasses = nonLocalJavaExternalExportedClasses.Filter(func(c types.ClassName) bool {
+		return !isInAllPackageNames(c.PackageName().Name)
 	})
 	nonLocalProductionJavaImportedClasses := productionJavaImportedClasses.Filter(func(c types.ClassName) bool {
 		for _, n := range allPackageNamesSlice {
