@@ -357,6 +357,27 @@ GenJavaTests(
 	require.Equal(t, []string{"//processors:processor"}, res.Gen[0].AttrStrings("plugins"))
 }
 
+func TestTransitionExistingLibraryKind(t *testing.T) {
+	f, err := rule.LoadData("BUILD.bazel", "", []byte(`
+java_library(name = "kotlin")
+# keep
+java_library(name = "kept")
+`))
+	require.NoError(t, err)
+
+	transitionExistingLibraryKind(f, "kotlin", "kt_jvm_library")
+	transitionExistingLibraryKind(f, "kept", "kt_jvm_library")
+
+	got := make(map[string]string)
+	for _, r := range f.Rules {
+		got[r.Name()] = r.Kind()
+	}
+	require.Equal(t, map[string]string{
+		"kotlin": "kt_jvm_library",
+		"kept":   "java_library",
+	}, got)
+}
+
 func TestDeclaredOuterClassNames(t *testing.T) {
 	declared := sorted_set.NewSortedSetFn([]types.ClassName{
 		types.NewClassName(types.NewPackageName("com.example"), "Regular"),

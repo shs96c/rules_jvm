@@ -273,6 +273,9 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				nonLocalJavaExportedClasses.AddAll(mJavaPkg.DeclaredClasses)
 				for _, f := range mJavaPkg.Files.SortedSlice() {
 					productionJavaFiles.Add(filepath.Join(mRel, f))
+					if strings.HasSuffix(f, ".kt") {
+						hasKotlinFiles = true
+					}
 					jf := javaFile{pathRelativeToBazelWorkspaceRoot: filepath.Join(mRel, f), pkg: mJavaPkg.Name}
 					nonLocalJavaExportedClasses.Add(*jf.ClassName())
 				}
@@ -285,6 +288,9 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 					file := javaFile{
 						pathRelativeToBazelWorkspaceRoot: path,
 						pkg:                              mJavaPkg.Name,
+					}
+					if strings.HasSuffix(f, ".kt") {
+						hasKotlinFiles = true
 					}
 					accumulateJavaFile(cfg, testJavaFiles, testHelperJavaFiles, separateTestJavaFiles, file, mJavaPkg.PerClassMetadata, log)
 					if cfg.IsJavaTestFile(filepath.Base(path)) {
@@ -1198,6 +1204,23 @@ func accumulateJavaFile(cfg *javaconfig.Config, testJavaFiles, testHelperJavaFil
 	}
 }
 
+// transitionExistingLibraryKind lets Gazelle merge a library while its generated kind
+// changes from Java to Kotlin. Gazelle otherwise rejects a same-name/different-kind match,
+// leaves the stale parsed rule in the index, and loses the generated rule's private package
+// and class ownership metadata for the resolve phase.
+func transitionExistingLibraryKind(file *rule.File, name, desiredKind string) {
+	if file == nil || desiredKind != "kt_jvm_library" {
+		return
+	}
+	for _, existing := range file.Rules {
+		if existing.Name() != name || existing.Kind() != "java_library" || existing.ShouldKeep() {
+			continue
+		}
+		existing.SetKind(desiredKind)
+		return
+	}
+}
+
 // generateJavaLibraryArgs describes a single java_library target to generate. It groups
 // the many per-library attributes that would otherwise be positional arguments,
 // several of which share a type and so are easy to transpose by mistake.
@@ -1229,6 +1252,7 @@ type generateJavaLibraryArgs struct {
 }
 
 func (l javaLang) generateJavaLibrary(args generateJavaLibraryArgs) {
+	transitionExistingLibraryKind(args.File, args.Name, args.LibraryKind)
 	r := rule.NewRule(args.LibraryKind, args.Name)
 
 	if plugins := l.collectExistingLabelAttr(args.Name, "plugins", args.File); plugins.Len() > 0 {
