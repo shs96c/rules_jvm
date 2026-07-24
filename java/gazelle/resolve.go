@@ -243,16 +243,56 @@ func ruleIsTestOnly(r *rule.Rule) bool {
 // It lets compact whole-package Maven index entries participate without
 // overriding a class that the current workspace defines.
 func (jr *Resolver) resolveMavenWholePackageClass(pc *javaconfig.Config, className types.ClassName) (label.Label, error) {
-	l, err := jr.lang.mavenResolver.Resolve(className.PackageName(), pc.ExcludedArtifacts(), pc.MavenRepositoryName())
+	excludedArtifacts := pc.ExcludedArtifacts()
+	mavenRepositoryName := pc.MavenRepositoryName()
+	packageName := className.PackageName()
+	l, err := jr.lang.mavenResolver.Resolve(packageName, excludedArtifacts, mavenRepositoryName)
 	if err == nil {
 		return l, nil
 	}
+	if !isMavenPackageMissOrAmbiguity(err) {
+		return label.NoLabel, err
+	}
+
+	seen := map[string]struct{}{packageName.Name: {}}
+	parts := strings.Split(className.FullyQualifiedClassName(), ".")
+	for i := len(parts) - 1; i > 0; i-- {
+		candidateName := strings.Join(parts[:i], ".")
+		if _, ok := seen[candidateName]; ok {
+			continue
+		}
+		seen[candidateName] = struct{}{}
+		candidatePackage := types.NewPackageName(candidateName)
+		l, err = jr.lang.mavenResolver.Resolve(candidatePackage, excludedArtifacts, mavenRepositoryName)
+		if err == nil {
+			return l, nil
+		}
+		if !isMavenPackageMissOrAmbiguity(err) {
+			return label.NoLabel, err
+		}
+	}
+	return label.NoLabel, nil
+}
+
+func isMavenPackageMissOrAmbiguity(err error) bool {
 	var noExternal *maven.NoExternalImportsError
 	var multipleExternal *maven.MultipleExternalImportsError
-	if errors.As(err, &noExternal) || errors.As(err, &multipleExternal) {
-		return label.NoLabel, nil
+	return errors.As(err, &noExternal) || errors.As(err, &multipleExternal)
+}
+
+func findClassRuleWithOverride(c *config.Config, className types.ClassName) (label.Label, bool) {
+	exactName := className.FullyQualifiedClassName()
+	importSpec := resolve.ImportSpec{Lang: languageName, Imp: exactName}
+	if ol, found := resolve.FindRuleWithOverride(c, importSpec, languageName); found {
+		return ol, true
 	}
-	return label.NoLabel, err
+
+	outerName := className.FullyQualifiedOuterClassName()
+	if outerName == exactName {
+		return label.NoLabel, false
+	}
+	importSpec.Imp = outerName
+	return resolve.FindRuleWithOverride(c, importSpec, languageName)
 }
 
 func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rule.Rule, attrName string, requiredPackageNames *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], ix *resolve.RuleIndex, isTestRule bool, from label.Label, ownPackageNames *sorted_set.SortedSet[types.PackageName]) {
@@ -286,8 +326,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 		hasClassOverrides := false
 		if len(classesByPackage[imp]) > 0 {
 			for _, className := range classesByPackage[imp] {
-				classImportSpec := resolve.ImportSpec{Lang: languageName, Imp: className.FullyQualifiedClassName()}
-				if _, found := resolve.FindRuleWithOverride(c, classImportSpec, languageName); found {
+				if _, found := findClassRuleWithOverride(c, className); found {
 					hasClassOverrides = true
 					break
 				}
@@ -305,8 +344,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 
 			for _, className := range classesByPackage[imp] {
 				// Check for explicit resolve directive for this specific class first
-				classImportSpec := resolve.ImportSpec{Lang: languageName, Imp: className.FullyQualifiedClassName()}
-				if ol, found := resolve.FindRuleWithOverride(c, classImportSpec, languageName); found {
+				if ol, found := findClassRuleWithOverride(c, className); found {
 					labels.Add(simplifyLabel(c.RepoName, ol, from))
 					continue
 				}
@@ -385,8 +423,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 			resolvedAny := false
 			for _, className := range classesByPackage[imp] {
 				// Check for explicit resolve directive for this specific class first
-				classImportSpec := resolve.ImportSpec{Lang: languageName, Imp: className.FullyQualifiedClassName()}
-				if ol, found := resolve.FindRuleWithOverride(c, classImportSpec, languageName); found {
+				if ol, found := findClassRuleWithOverride(c, className); found {
 					labels.Add(simplifyLabel(c.RepoName, ol, from))
 					resolvedAny = true
 					continue
@@ -738,8 +775,7 @@ func (jr *Resolver) buildPackageClassIndex(c *config.Config, pkg types.PackageNa
 func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, className types.ClassName, ix *resolve.RuleIndex, from label.Label, isTestRule bool) (out label.Label) {
 	imp := className.FullyQualifiedClassName()
 	// Check for manual override first
-	importSpec := resolve.ImportSpec{Lang: languageName, Imp: imp}
-	if ol, found := resolve.FindRuleWithOverride(c, importSpec, languageName); found {
+	if ol, found := findClassRuleWithOverride(c, className); found {
 		return ol
 	}
 
