@@ -37,12 +37,23 @@ type Resolver interface {
 	ResolveClass(className types.ClassName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error)
 }
 
+// CompileResolver is an optional extension for languages whose compiler needs
+// same-package artifacts that are implementation dependencies of the artifact
+// selected for an imported symbol. Kotlin top-level functions are one example:
+// their public signature may expose types from a dependency jar in the same
+// package even though the imported symbol itself has one exact owner.
+type CompileResolver interface {
+	ResolveCompilePackage(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) ([]label.Label, error)
+	CompileCompanions(pkg types.PackageName, selected []label.Label, excludedArtifacts map[string]struct{}, mavenRepositoryName string) []label.Label
+}
+
 // resolver finds Maven provided packages by reading the maven_install.json
 // file from rules_jvm_external.
 type resolver struct {
-	data       *multiset.StringMultiSet
-	classIndex map[string]string
-	logger     zerolog.Logger
+	data         *multiset.StringMultiSet
+	classIndex   map[string]string
+	dependencies map[string][]string
+	logger       zerolog.Logger
 }
 
 // ResolverOption configures a resolver.
@@ -84,9 +95,10 @@ func NewResolver(opts ...ResolverOption) (Resolver, error) {
 	}
 
 	r := resolver{
-		data:       multiset.NewStringMultiSet(),
-		classIndex: make(map[string]string),
-		logger:     cfg.logger.With().Str("_c", "maven-resolver").Logger(),
+		data:         multiset.NewStringMultiSet(),
+		classIndex:   make(map[string]string),
+		dependencies: make(map[string][]string),
+		logger:       cfg.logger.With().Str("_c", "maven-resolver").Logger(),
 	}
 
 	var c lockFile
@@ -131,11 +143,20 @@ func NewResolver(opts ...ResolverOption) (Resolver, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse coordinate %v: %w", coords, err)
 		}
+		artifact := coords.ArtifactString()
+		for _, directDepName := range c.ListDirectDependencies(depName) {
+			directCoords, err := ParseCoordinate(c.GetDependencyCoordinates(directDepName))
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse direct dependency coordinate %q: %w", directDepName, err)
+			}
+			r.dependencies[artifact] = append(r.dependencies[artifact], directCoords.ArtifactString())
+		}
+		r.dependencies[artifact] = uniqueSortedStrings(r.dependencies[artifact])
 		for _, pkg := range c.ListDependencyPackages(depName) {
-			r.data.Add(pkg, coords.ArtifactString())
+			r.data.Add(pkg, artifact)
 		}
 		for _, class := range c.ListDependencyClasses(depName) {
-			r.classIndex[class] = coords.ArtifactString()
+			r.classIndex[class] = artifact
 		}
 	}
 
@@ -157,6 +178,20 @@ func NewResolver(opts ...ResolverOption) (Resolver, error) {
 	}
 
 	return &r, nil
+}
+
+func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Strings(values)
+	out := values[:1]
+	for _, value := range values[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 // indexKeys returns the union of the index's package and class keys, ordered
@@ -212,38 +247,151 @@ func (r *resolver) seedIndexKey(index *IndexFile, key, artifactString string) {
 }
 
 func (r *resolver) Resolve(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
-	v, found := r.data.Get(pkg.Name)
-	if !found {
-		return label.NoLabel, &NoExternalImportsError{PackageName: pkg.Name}
-	}
-
-	var filtered []string
-	for k := range v {
-		if _, excluded := excludedArtifacts[LabelFromArtifact(mavenRepositoryName, k).String()]; excluded {
-			continue
-		}
-		filtered = append(filtered, LabelFromArtifact(mavenRepositoryName, k).String())
-	}
-	sort.Strings(filtered)
+	owners := r.packageOwners(pkg, excludedArtifacts, mavenRepositoryName)
+	filtered := labelsForArtifacts(mavenRepositoryName, owners)
 
 	switch len(filtered) {
 	case 0:
 		return label.NoLabel, &NoExternalImportsError{PackageName: pkg.Name}
 
 	case 1:
-		var ret string
-		for _, r := range filtered {
-			ret = r
-			break
-		}
-		return label.Parse(ret)
+		return filtered[0], nil
 
 	default:
+		possible := make([]string, 0, len(filtered))
+		for _, l := range filtered {
+			possible = append(possible, l.String())
+		}
 		return label.NoLabel, &MultipleExternalImportsError{
 			PackageName:      pkg.Name,
-			PossiblePackages: filtered,
+			PossiblePackages: possible,
 		}
 	}
+}
+
+// ResolveCompilePackage resolves a package-only import when its split-package
+// owners form one dependency-rooted compile group. The unique root is returned
+// first; the remaining labels are its same-package dependency companions.
+func (r *resolver) ResolveCompilePackage(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) ([]label.Label, error) {
+	owners := r.packageOwners(pkg, excludedArtifacts, mavenRepositoryName)
+	switch len(owners) {
+	case 0:
+		return nil, &NoExternalImportsError{PackageName: pkg.Name}
+	case 1:
+		return r.labelsForCompileGroup(pkg, owners[0], excludedArtifacts, mavenRepositoryName), nil
+	}
+
+	var roots []string
+	for _, owner := range owners {
+		group := r.samePackageDependencyArtifacts(pkg, owner, excludedArtifacts, mavenRepositoryName)
+		if len(group) == len(owners) {
+			roots = append(roots, owner)
+		}
+	}
+	if len(roots) != 1 {
+		possible := make([]string, 0, len(owners))
+		for _, l := range labelsForArtifacts(mavenRepositoryName, owners) {
+			possible = append(possible, l.String())
+		}
+		return nil, &MultipleExternalImportsError{
+			PackageName:      pkg.Name,
+			PossiblePackages: possible,
+		}
+	}
+
+	return r.labelsForCompileGroup(pkg, roots[0], excludedArtifacts, mavenRepositoryName), nil
+}
+
+// CompileCompanions returns the same-package portion of the Maven dependency
+// closure rooted at selected package owners. It never adds an arbitrary split
+// owner: the selected artifact must own pkg, and every addition must be both a
+// dependency of that owner and an exact owner of pkg itself.
+func (r *resolver) CompileCompanions(pkg types.PackageName, selected []label.Label, excludedArtifacts map[string]struct{}, mavenRepositoryName string) []label.Label {
+	selectedSet := make(map[label.Label]struct{}, len(selected))
+	for _, l := range selected {
+		selectedSet[l] = struct{}{}
+	}
+
+	owners := r.packageOwners(pkg, excludedArtifacts, mavenRepositoryName)
+	seen := make(map[string]struct{}, len(owners))
+	var artifacts []string
+	for _, owner := range owners {
+		if _, ok := selectedSet[LabelFromArtifact(mavenRepositoryName, owner)]; !ok {
+			continue
+		}
+		for _, artifact := range r.samePackageDependencyArtifacts(pkg, owner, excludedArtifacts, mavenRepositoryName) {
+			if _, ok := seen[artifact]; ok {
+				continue
+			}
+			seen[artifact] = struct{}{}
+			artifacts = append(artifacts, artifact)
+		}
+	}
+	return labelsForArtifacts(mavenRepositoryName, artifacts)
+}
+
+func (r *resolver) packageOwners(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) []string {
+	v, found := r.data.Get(pkg.Name)
+	if !found {
+		return nil
+	}
+
+	owners := make([]string, 0, len(v))
+	for artifact := range v {
+		if _, excluded := excludedArtifacts[LabelFromArtifact(mavenRepositoryName, artifact).String()]; excluded {
+			continue
+		}
+		owners = append(owners, artifact)
+	}
+	sort.Strings(owners)
+	return owners
+}
+
+func (r *resolver) samePackageDependencyArtifacts(pkg types.PackageName, root string, excludedArtifacts map[string]struct{}, mavenRepositoryName string) []string {
+	owners := make(map[string]struct{})
+	for _, artifact := range r.packageOwners(pkg, excludedArtifacts, mavenRepositoryName) {
+		owners[artifact] = struct{}{}
+	}
+
+	visited := make(map[string]struct{})
+	stack := []string{root}
+	reachableOwners := make(map[string]struct{})
+	for len(stack) > 0 {
+		artifact := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if _, ok := visited[artifact]; ok {
+			continue
+		}
+		visited[artifact] = struct{}{}
+		if _, ok := owners[artifact]; ok {
+			reachableOwners[artifact] = struct{}{}
+		}
+		stack = append(stack, r.dependencies[artifact]...)
+	}
+
+	companions := make([]string, 0, len(reachableOwners))
+	for artifact := range reachableOwners {
+		if artifact != root {
+			companions = append(companions, artifact)
+		}
+	}
+	sort.Strings(companions)
+	if _, ok := reachableOwners[root]; !ok {
+		return companions
+	}
+	return append([]string{root}, companions...)
+}
+
+func (r *resolver) labelsForCompileGroup(pkg types.PackageName, root string, excludedArtifacts map[string]struct{}, mavenRepositoryName string) []label.Label {
+	return labelsForArtifacts(mavenRepositoryName, r.samePackageDependencyArtifacts(pkg, root, excludedArtifacts, mavenRepositoryName))
+}
+
+func labelsForArtifacts(mavenRepositoryName string, artifacts []string) []label.Label {
+	labels := make([]label.Label, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		labels = append(labels, LabelFromArtifact(mavenRepositoryName, artifact))
+	}
+	return labels
 }
 
 func (r *resolver) ResolveClass(className types.ClassName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {

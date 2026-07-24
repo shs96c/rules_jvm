@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "packages": {},
+  "split_package_classes": {
+    "com.example:split-a": {
+      "com.example.split": [
+        "A"
+      ]
+    },
+    "com.example:split-b": {
+      "com.example.split": [
+        "B"
+      ]
+    },
+    "io.mockk:mockk-dsl-jvm": {
+      "io.mockk": [
+        "MockKStubScope",
+        "Runs"
+      ]
+    },
+    "io.mockk:mockk-jvm": {
+      "io.mockk": [
+        "MockKAnnotations",
+        "every"
+      ],
+      "io.mockk.junit5": [
+        "MockKExtension"
+      ]
+    }
+  }
+}
