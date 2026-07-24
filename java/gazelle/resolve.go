@@ -240,11 +240,38 @@ func ruleIsTestOnly(r *rule.Rule) bool {
 	return false
 }
 
+// resolveKotlinReflectionFunctionClass handles Kotlin reflection function types
+// synthesized by the compiler. kotlin-reflect provides these built-ins without
+// corresponding class entries for Maven's exact-class index.
+func resolveKotlinReflectionFunctionClass(pc *javaconfig.Config, className types.ClassName) label.Label {
+	const prefix = "kotlin.reflect.KFunction"
+	name := className.FullyQualifiedClassName()
+	if !strings.HasPrefix(name, prefix) {
+		return label.NoLabel
+	}
+
+	functionArity := strings.TrimPrefix(name, prefix)
+	if functionArity == "" {
+		return label.NoLabel
+	}
+	for _, digit := range functionArity {
+		if digit < '0' || digit > '9' {
+			return label.NoLabel
+		}
+	}
+
+	return maven.LabelFromArtifact(pc.MavenRepositoryName(), "org.jetbrains.kotlin:kotlin-reflect")
+}
+
 // resolveMavenWholePackageClass is the last class-level fallback after exact
 // Maven ownership and workspace/CrossResolver ownership have both missed.
 // It lets compact whole-package Maven index entries participate without
 // overriding a class that the current workspace defines.
 func (jr *Resolver) resolveMavenWholePackageClass(pc *javaconfig.Config, className types.ClassName) (label.Label, error) {
+	if l := resolveKotlinReflectionFunctionClass(pc, className); l != label.NoLabel {
+		return l, nil
+	}
+
 	excludedArtifacts := pc.ExcludedArtifacts()
 	mavenRepositoryName := pc.MavenRepositoryName()
 	packageName := className.PackageName()
