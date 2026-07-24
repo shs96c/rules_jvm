@@ -679,6 +679,7 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 				mainLibraryNames[main.FullyQualifiedClassName()] = groupLibraryName
 			}
 			addNonLocalImportsAndExports(imports, importedClasses, exports, externalExportedClasses, pkg.ImportedClasses, pkg.ImportedPackagesWithoutSpecificClasses, pkg.ExportedClasses, pkg.Name, likelyLocalClassNames)
+			ownClasses.AddAll(pkg.DeclaredClasses)
 			for _, f := range pkg.Files.SortedSlice() {
 				if strings.HasSuffix(f, ".kt") {
 					groupLibraryKind = "kt_jvm_library"
@@ -1094,6 +1095,7 @@ func filterImportsInModule(packages *sorted_set.SortedSet[types.PackageName], cl
 		return !modulePackages.Contains(p)
 	}), classes
 }
+
 // filterNamespaceClassesInModule removes parser-produced classes that are
 // actually owned package namespaces or locally declared classes. Declaration
 // matching keeps undeclared external split-package classes visible.
