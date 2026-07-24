@@ -46,13 +46,9 @@ func (jr *Resolver) populateProductionAssociatesAttr(c *config.Config, r *rule.R
 
 	if len(associates) > 0 {
 		// Non-leaf: friend same-module deps; it adopts their module_name, so it must not set one.
-		r.SetAttr("associates", associates)
+		replaceStringListAttr(r, "associates", associates)
 		r.DelAttr("module_name")
-		if len(kept) == 0 {
-			r.DelAttr("deps")
-		} else {
-			r.SetAttr("deps", kept)
-		}
+		replaceStringListAttr(r, "deps", kept)
 		return
 	}
 
