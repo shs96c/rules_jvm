@@ -373,6 +373,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		javaLibraryKind = "kt_jvm_library"
 	}
 
+	mainLibraryNames := make(map[string]string)
 	// Check if this is a resources root directory and generate a pkg_files target
 	if isResourcesRoot && len(srcFilenamesRelativeToPackage) == 0 {
 		// Collect resource files recursively from this directory and all subdirectories
@@ -468,7 +469,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 			// library per package. Collapse only the packages that must share a module
 			// (import cycles + internal coupling) into the minimal set of targets;
 			// everything else stays its own per-package library.
-			l.emitModuleProductionLibraries(args, cfg, likelyLocalClassNames, resourcesDirectRef, resourcesRuntimeDep, &res, log)
+			mainLibraryNames = l.emitModuleProductionLibraries(args, cfg, likelyLocalClassNames, resourcesDirectRef, resourcesRuntimeDep, &res, log)
 		} else {
 			// "module" (one coarse library for the whole subtree) and "package" (this
 			// single package) both emit exactly one library here.
@@ -496,7 +497,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 
 	allTestRelatedSrcs := testJavaFiles.Clone()
 	allTestRelatedSrcs.AddAll(testHelperJavaFiles)
-	l.processJavaBinary(args.File, args.Rel, allMains, allTestRelatedSrcs, &res, cfg)
+	l.processJavaBinary(args.File, args.Rel, allMains, allTestRelatedSrcs, mainLibraryNames, &res, cfg)
 
 	// We add special packages to point to testonly libraries which - this accumulates them,
 	// as well as the existing java imports of tests.
@@ -635,8 +636,9 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 // group. Imports
 // satisfied by another group are left in place for the resolver to turn into `deps`
 // pointing at that group's label, which works because each group registers the packages
-// it owns.
-func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg *javaconfig.Config, likelyLocalClassNames *sorted_set.SortedSet[string], resourcesDirectRef, resourcesRuntimeDep string, res *language.GenerateResult, log zerolog.Logger) {
+// it owns. The returned map connects each parsed main class to its emitted group so
+// generated binaries can depend on the real SCC owner rather than a coarse default.
+func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg *javaconfig.Config, likelyLocalClassNames *sorted_set.SortedSet[string], resourcesDirectRef, resourcesRuntimeDep string, res *language.GenerateResult, log zerolog.Logger) map[string]string {
 	cfgs := args.Config.Exts[languageName].(javaconfig.Configs)
 	productionPackagesByDir := make(map[string]*java.Package)
 	for mRel, mJavaPkg := range l.javaPackageCache {
@@ -653,6 +655,7 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 	if err != nil {
 		log.Fatal().Err(err).Msg("could not compute module collapse")
 	}
+	mainLibraryNames := make(map[string]string)
 
 	for _, group := range graph.Groups() {
 		groupFiles := sorted_set.NewSortedSet([]string{})
@@ -669,8 +672,12 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 		// The module root has no sources of its own, so the rule kind is determined by
 		// the group's files rather than args.RegularFiles.
 		groupLibraryKind := "java_library"
+		groupLibraryName := cfg.MapLibraryName(group.Name)
 		for _, dir := range group.Dirs {
 			pkg := productionPackagesByDir[dir]
+			for _, main := range pkg.Mains.SortedSlice() {
+				mainLibraryNames[main.FullyQualifiedClassName()] = groupLibraryName
+			}
 			addNonLocalImportsAndExports(imports, importedClasses, exports, externalExportedClasses, pkg.ImportedClasses, pkg.ImportedPackagesWithoutSpecificClasses, pkg.ExportedClasses, pkg.Name, likelyLocalClassNames)
 			for _, f := range pkg.Files.SortedSlice() {
 				if strings.HasSuffix(f, ".kt") {
@@ -709,7 +716,7 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 			LibraryKind:             groupLibraryKind,
 			Result:                  res,
 			Config:                  cfg,
-			Name:                    group.Name,
+			Name:                    groupLibraryName,
 			Srcs:                    groupFiles.SortedSlice(),
 			ResourcesDirectRef:      resourcesDirectRef,
 			ResourcesRuntimeDep:     resourcesRuntimeDep,
@@ -723,6 +730,7 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 			TestOnly:                cfg.TestOnly(),
 		})
 	}
+	return mainLibraryNames
 }
 
 func (l javaLang) collectRuntimeDeps(kind, name string, file *rule.File) *sorted_set.SortedSet[label.Label] {
@@ -1390,7 +1398,8 @@ func javaFileClassesOwnMain(classes map[string]struct{}, main types.ClassName) b
 	}
 }
 
-func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorted_set.SortedSet[types.ClassName], testOwnedJavaFiles *sorted_set.SortedSet[javaFile], res *language.GenerateResult, cfg *javaconfig.Config) {
+func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorted_set.SortedSet[types.ClassName], testOwnedJavaFiles *sorted_set.SortedSet[javaFile], mainLibraryNames map[string]string, res *language.GenerateResult, cfg *javaconfig.Config) {
+	defaultLibraryName := cfg.MapLibraryName(filepath.Base(rel))
 	var testOwnedJavaClasses map[string]struct{}
 	for _, m := range allMains.SortedSlice() {
 		// Lazily populate because java_binaries are pretty rare
@@ -1407,11 +1416,15 @@ func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorte
 		if !cfg.GenerateBinary() {
 			continue
 		}
-		l.generateJavaBinary(file, m, cfg.MapLibraryName(filepath.Base(rel)), false, res)
+		libraryName := defaultLibraryName
+		if owner, ok := mainLibraryNames[m.FullyQualifiedClassName()]; ok {
+			libraryName = owner
+		}
+		l.generateJavaBinary(file, m, libraryName, defaultLibraryName, false, res)
 	}
 }
 
-func (l javaLang) generateJavaBinary(file *rule.File, m types.ClassName, libName string, testonly bool, res *language.GenerateResult) {
+func (l javaLang) generateJavaBinary(file *rule.File, m types.ClassName, libName, defaultLibName string, testonly bool, res *language.GenerateResult) {
 	const ruleKind = "java_binary"
 	name := m.BareOuterClassName()
 	r := rule.NewRule("java_binary", name) // FIXME check collision on name
@@ -1422,6 +1435,13 @@ func (l javaLang) generateJavaBinary(file *rule.File, m types.ClassName, libName
 	}
 
 	runtimeDeps := l.collectRuntimeDeps(ruleKind, name, file)
+	if libName != defaultLibName {
+		// A previous run may have generated the coarse default before SCC ownership was
+		// available. Remove only that relative label; preserve every reviewed runtime dep.
+		runtimeDeps = runtimeDeps.Filter(func(dep label.Label) bool {
+			return !dep.Relative || dep.Name != defaultLibName
+		})
+	}
 	runtimeDeps.Add(label.Label{Name: libName, Relative: true})
 	r.SetAttr("runtime_deps", labelsToStrings(runtimeDeps.SortedSlice()))
 	r.SetAttr("visibility", []string{"//visibility:public"})
