@@ -365,6 +365,54 @@ func TestAddNonLocalImports(t *testing.T) {
 	}
 }
 
+func TestIsOwnedByModuleRoot(t *testing.T) {
+	root := javaconfig.New(".")
+	require.NoError(t, root.SetModuleGranularity("module"))
+
+	owned := root.NewChild()
+	packageBoundary := root.NewChild()
+	require.NoError(t, packageBoundary.SetModuleGranularity("package"))
+	packageChild := packageBoundary.NewChild()
+	nestedRoot := packageBoundary.NewChild()
+	require.NoError(t, nestedRoot.SetModuleGranularity("module"))
+	nestedChild := nestedRoot.NewChild()
+	directNestedRoot := root.NewChild()
+	require.NoError(t, directNestedRoot.SetModuleGranularity("module"))
+	directNestedChild := directNestedRoot.NewChild()
+
+	cfgs := javaconfig.Configs{
+		"module":                   root,
+		"module/owned":             owned,
+		"module/separate":          packageBoundary,
+		"module/separate/child":    packageChild,
+		"module/separate/nested":   nestedRoot,
+		"module/separate/nested/x": nestedChild,
+		"module/direct-nested":     directNestedRoot,
+		"module/direct-nested/x":   directNestedChild,
+	}
+
+	for name, tc := range map[string]struct {
+		candidate string
+		want      bool
+	}{
+		"root":                     {candidate: "module", want: true},
+		"inherited module child":   {candidate: "module/owned", want: true},
+		"package boundary":         {candidate: "module/separate", want: false},
+		"package boundary child":   {candidate: "module/separate/child", want: false},
+		"nested module root":       {candidate: "module/separate/nested", want: false},
+		"nested module root child": {candidate: "module/separate/nested/x", want: false},
+		"direct nested root":       {candidate: "module/direct-nested", want: false},
+		"direct nested root child": {candidate: "module/direct-nested/x", want: false},
+		"path prefix sibling":      {candidate: "module-other", want: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := isOwnedByModuleRoot(cfgs, tc.candidate, "module"); got != tc.want {
+				t.Fatalf("isOwnedByModuleRoot(%q, %q) = %t, want %t", tc.candidate, "module", got, tc.want)
+			}
+		})
+	}
+}
+
 func newTestJavaLang(t *testing.T) javaLang {
 	t.Helper()
 	return javaLang{
