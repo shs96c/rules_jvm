@@ -714,9 +714,13 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 }
 
 func (l javaLang) collectRuntimeDeps(kind, name string, file *rule.File) *sorted_set.SortedSet[label.Label] {
-	runtimeDeps := sorted_set.NewSortedSetFn([]label.Label{}, labelLess)
+	return l.collectExistingLabelAttr(name, "runtime_deps", file)
+}
+
+func (l javaLang) collectExistingLabelAttr(name, attrName string, file *rule.File) *sorted_set.SortedSet[label.Label] {
+	labels := sorted_set.NewSortedSetFn([]label.Label{}, labelLess)
 	if file == nil {
-		return runtimeDeps
+		return labels
 	}
 
 	for _, r := range file.Rules {
@@ -724,26 +728,27 @@ func (l javaLang) collectRuntimeDeps(kind, name string, file *rule.File) *sorted
 			continue
 		}
 
-		// This does not support non string list values from runtime_deps.
+		// This does not support non-string list values.
 		// Currently, that means if a target has a runtime_deps of a different
 		// kind (e.g. a select), we will remove it. Hopefully in the future we
 		// can be less destructive.
-		for _, dep := range r.AttrStrings("runtime_deps") {
-			parsedLabel, err := label.Parse(dep)
+		for _, value := range r.AttrStrings(attrName) {
+			parsedLabel, err := label.Parse(value)
 			if err != nil {
 				l.logger.Fatal().
 					Str("file.Pkg", file.Pkg).
 					Str("name", name).
-					Str("dep", dep).
+					Str("attr", attrName).
+					Str("value", value).
 					Err(err).
 					Msg("label parse error")
 			}
-			runtimeDeps.Add(parsedLabel)
+			labels.Add(parsedLabel)
 		}
 		break
 	}
 
-	return runtimeDeps
+	return labels
 }
 
 func generateProtoLibraries(l *javaLang, args language.GenerateArgs, log zerolog.Logger, res *language.GenerateResult, cfg *javaconfig.Config) {
@@ -1226,6 +1231,10 @@ type generateJavaLibraryArgs struct {
 func (l javaLang) generateJavaLibrary(args generateJavaLibraryArgs) {
 	r := rule.NewRule(args.LibraryKind, args.Name)
 
+	if plugins := l.collectExistingLabelAttr(args.Name, "plugins", args.File); plugins.Len() > 0 {
+		r.SetAttr("plugins", labelsToStrings(plugins.SortedSlice()))
+	}
+
 	if args.LibraryKind == "kt_jvm_library" {
 		// Record this Kotlin library so the resolver can turn a depender's same-module dep
 		// on it into an `associates` (friend) edge, preserving module-wide `internal`.
@@ -1448,6 +1457,9 @@ var junit5RuntimeDeps = []string{
 func (l javaLang) generateJavaTestSuite(file *rule.File, name string, srcs []string, packageNames *sorted_set.SortedSet[types.PackageName], mavenRepositoryName string, imports *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], annotationProcessorClasses *sorted_set.SortedSet[types.ClassName], customTestSuffixes *[]string, hasHelpers bool, res *language.GenerateResult) {
 	const ruleKind = "java_test_suite"
 	r := rule.NewRule(ruleKind, name)
+	if plugins := l.collectExistingLabelAttr(name, "plugins", file); plugins.Len() > 0 {
+		r.SetAttr("plugins", labelsToStrings(plugins.SortedSlice()))
+	}
 	r.SetAttr("srcs", srcs)
 	resolvablePackages := make([]types.ResolvableJavaPackage, 0, packageNames.Len())
 	if hasHelpers {

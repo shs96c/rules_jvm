@@ -1,1 +1,1 @@
-{"level":"fatal","file.Pkg":"src/main/java/com/example/hello","name":"hello","dep":"@invalid:label","error":"label parse error: repository has invalid characters: \"@invalid:label\"","message":"label parse error"}
+{"level":"fatal","file.Pkg":"src/main/java/com/example/hello","name":"hello","attr":"runtime_deps","value":"@invalid:label","error":"label parse error: repository has invalid characters: \"@invalid:label\"","message":"label parse error"}
