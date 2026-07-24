@@ -181,9 +181,17 @@ func (jr *Resolver) populateAssociatesAttr(c *config.Config, ix *resolve.RuleInd
 	for _, pkg := range resolveInput.PackageNames.SortedSlice() {
 		mainSpec := resolve.ImportSpec{Lang: languageName, Imp: types.NewResolvableJavaPackage(pkg, false, false).String()}
 		matches := ix.FindRulesByImportWithConfig(c, mainSpec, languageName)
-		if len(matches) == 1 && matches[0].Label != from {
-			associates.Add(simplifyLabel(c.RepoName, matches[0].Label, from))
+		if len(matches) != 1 {
+			continue
 		}
+		mainLabel := matches[0].Label.Abs(from.Repo, from.Pkg)
+		if mainLabel == from.Abs(from.Repo, from.Pkg) {
+			continue
+		}
+		if !jr.lang.kotlinLibraries[mainLabel.String()] {
+			continue
+		}
+		associates.Add(simplifyLabel(c.RepoName, mainLabel, from))
 	}
 	if associates.Len() == 0 {
 		return
