@@ -18,6 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.Stack;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles;
@@ -30,6 +31,7 @@ import org.jetbrains.kotlin.name.FqNamesUtilKt;
 import org.jetbrains.kotlin.name.Name;
 import org.jetbrains.kotlin.name.NameUtils;
 import org.jetbrains.kotlin.psi.KtAnnotated;
+import org.jetbrains.kotlin.psi.KtAnnotationEntry;
 import org.jetbrains.kotlin.psi.KtBinaryExpression;
 import org.jetbrains.kotlin.psi.KtCallExpression;
 import org.jetbrains.kotlin.psi.KtClass;
@@ -68,6 +70,8 @@ public class KtParser {
   // text with parentheses (a call chain) so we don't record `foo(x).bar(y).Baz` as an FQN.
   private static final Pattern QUALIFIED_NAME =
       Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+");
+  private static final Pattern FILE_JVM_NAME =
+      Pattern.compile("JvmName\\(\\s*\"([A-Za-z_$][A-Za-z0-9_$]*)\"\\s*\\)");
 
   private final CompilerConfiguration compilerConf = createCompilerConfiguration();
   private final KotlinCoreEnvironment env =
@@ -102,6 +106,8 @@ public class KtParser {
       ktFile.accept(visitor);
     }
 
+    visitor.packageData.usedTypes.removeAll(visitor.packageData.packages);
+    visitor.packageData.exportedTypes.removeAll(visitor.packageData.packages);
     return visitor.packageData;
   }
 
@@ -225,9 +231,7 @@ public class KtParser {
     @Override
     public void visitKtFile(KtFile file) {
       if (file.hasTopLevelCallables()) {
-        FqName filePackage = file.getPackageFqName();
-        String outerClassName = NameUtils.getScriptNameForFile(file.getName()) + "Kt";
-        FqName outerClassFqName = filePackage.child(Name.identifier(outerClassName));
+        FqName outerClassFqName = javaClassNameForKtFile(file);
         packageData.perClassData.put(outerClassFqName.toString(), new PerClassData());
       }
       super.visitKtFile(file);
@@ -445,7 +449,11 @@ public class KtParser {
           FqName relativeFqName =
               packageRelativeName(object.getFqName(), object.getContainingKtFile());
           if (isJvmStatic(function)) {
-            packageData.mainClasses.add(relativeFqName.parent().toString());
+            // A companion's static main is emitted on its containing class. A named object's
+            // static main is emitted on the object itself; taking parent() there produces
+            // FqName.ROOT and Gazelle generates a binary named "<root>".
+            packageData.mainClasses.add(
+                object.isCompanion() ? relativeFqName.parent().toString() : relativeFqName.asString());
           } else {
             packageData.mainClasses.add(relativeFqName.asString());
           }
@@ -1160,7 +1168,23 @@ public class KtParser {
 
     private FqName javaClassNameForKtFile(KtFile file) {
       FqName filePackage = file.getPackageFqName();
-      String outerClassName = NameUtils.getScriptNameForFile(file.getName()) + "Kt";
+      String outerClassName =
+          file.getFileAnnotationList() == null
+              ? null
+              : file.getFileAnnotationList().getAnnotationEntries().stream()
+                  .filter(
+                      annotation ->
+                          annotation.getShortName() != null
+                              && annotation.getShortName().asString().equals("JvmName"))
+                  .map(KtAnnotationEntry::getText)
+                  .map(FILE_JVM_NAME::matcher)
+                  .filter(Matcher::find)
+                  .map(matcher -> matcher.group(1))
+                  .findFirst()
+                  .orElse(null);
+      if (outerClassName == null) {
+        outerClassName = NameUtils.getScriptNameForFile(file.getName()) + "Kt";
+      }
       return filePackage.child(Name.identifier(outerClassName));
     }
 
