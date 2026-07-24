@@ -8,6 +8,7 @@ import (
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/language/proto"
+	"github.com/bazelbuild/bazel-gazelle/rule"
 	bzl "github.com/bazelbuild/buildtools/build"
 	"github.com/google/go-cmp/cmp"
 	"github.com/rs/zerolog"
@@ -288,6 +289,32 @@ func TestSuite(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSuitePreservesExistingPlugins(t *testing.T) {
+	f, err := rule.LoadData("BUILD.bazel", "", []byte(`
+GenJavaTests(
+    name = "blah",
+    plugins = ["//processors:processor"],
+)
+`))
+	require.NoError(t, err)
+
+	var res language.GenerateResult
+	l := newTestJavaLang(t)
+	l.generateJavaTestSuite(
+		f,
+		"blah",
+		[]string{"FooTest.java"},
+		stringsToPackageNames([]string{"com.example"}),
+		"maven",
+		stringsToPackageNames([]string{"org.junit"}),
+		nil, nil, nil, false,
+		&res,
+	)
+
+	require.Len(t, res.Gen, 1)
+	require.Equal(t, []string{"//processors:processor"}, res.Gen[0].AttrStrings("plugins"))
 }
 
 func TestDeclaredOuterClassNames(t *testing.T) {
