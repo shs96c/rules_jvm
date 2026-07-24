@@ -7,6 +7,8 @@ java_test_suite(
         "LibTest.java",
         "TestHelper.java",
     ],
-    associates = ["//src/main/com/example/lib"],
-    deps = ["@maven//:junit_junit"],
+    deps = [
+        "//src/main/com/example/lib",
+        "@maven//:junit_junit",
+    ],
 )
