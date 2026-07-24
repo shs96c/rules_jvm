@@ -28,6 +28,63 @@ import (
 	"golang.org/x/tools/go/vcs"
 )
 
+func TestSetLabelAttrIncludingExistingValuesPreservesGeneratedAndInferredLabels(t *testing.T) {
+	r := rule.NewRule("java_library", "app")
+	r.SetAttr("deps", []string{":proto"})
+	labels := sorted_set.NewSortedSetFn(
+		[]label.Label{label.New("maven", "", "joda_time_joda_time")},
+		sorted_set.LabelLess,
+	)
+
+	setLabelAttrIncludingExistingValues(r, "deps", labels)
+
+	want := []string{":proto", "@maven//:joda_time_joda_time"}
+	if got := r.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestSetManagedLabelAttrReplacesASTExpression(t *testing.T) {
+	r := rule.NewRule("java_library", "app")
+	oldExpr := &bzl.ListExpr{List: []bzl.Expr{
+		&bzl.StringExpr{Value: "@maven//:org_jruby_jruby_complete"},
+	}}
+	r.SetAttr("deps", oldExpr)
+	labels := sorted_set.NewSortedSetFn(
+		[]label.Label{label.New("maven", "", "joda_time_joda_time")},
+		sorted_set.LabelLess,
+	)
+
+	setManagedLabelAttr(r, "deps", labels)
+
+	if got := r.Attr("deps"); got == oldExpr {
+		t.Fatal("deps still references the destination AST expression")
+	}
+	want := []string{"@maven//:joda_time_joda_time"}
+	if got := r.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestSetLabelAttrIncludingExistingValuesPreservesPlugins(t *testing.T) {
+	r := rule.NewRule("java_library", "app")
+	r.SetAttr("plugins", []string{"//processors:manual"})
+	labels := sorted_set.NewSortedSetFn(
+		[]label.Label{label.New("", "processors", "inferred")},
+		sorted_set.LabelLess,
+	)
+
+	setLabelAttrIncludingExistingValues(r, "plugins", labels)
+
+	want := []string{
+		"//processors:inferred",
+		"//processors:manual",
+	}
+	if got := r.AttrStrings("plugins"); !reflect.DeepEqual(got, want) {
+		t.Errorf("plugins mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
 func TestImports(t *testing.T) {
 	type buildFile struct {
 		rel, content string
