@@ -4,9 +4,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 	"github.com/bazelbuild/bazel-gazelle/label"
+	"github.com/bazelbuild/bazel-gazelle/language"
 	"github.com/bazelbuild/bazel-gazelle/resolve"
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
@@ -110,6 +113,108 @@ java_test_suite(
 	got := importerRule.AttrStrings("deps")
 	if len(got) != 1 || got[0] != "//helpers:suite-two-test-lib" {
 		t.Errorf("deps mismatch: got %v, want [//helpers:suite-two-test-lib]", got)
+	}
+}
+
+func TestModuleSccSplitPackageDeclaredClassesResolveToOwningGroup(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	var jLang *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			jLang = jl
+			break
+		}
+	}
+	if jLang == nil {
+		t.Fatal("javaLang not found in test config")
+	}
+
+	const moduleRoot = "src/main/java"
+	rootConfig := javaconfig.New(c.RepoRoot)
+	if err := rootConfig.SetModuleGranularity("scc"); err != nil {
+		t.Fatal(err)
+	}
+	configs := c.Exts[languageName].(javaconfig.Configs)
+	configs[moduleRoot] = rootConfig
+	for _, rel := range []string{
+		moduleRoot + "/consumer",
+		moduleRoot + "/model",
+		moduleRoot + "/util",
+	} {
+		configs[rel] = rootConfig.NewChild()
+	}
+
+	sharedPackage := types.NewPackageName("com.example.creditlines")
+	topLevelFunction := types.NewClassName(sharedPackage, "calculationForTest")
+	secondaryClass := types.NewClassName(sharedPackage, "CreditLineSnapshot")
+	consumerClass := types.NewClassName(sharedPackage, "Consumer")
+	jLang.javaPackageCache = map[string]*java.Package{
+		moduleRoot + "/consumer": {
+			Name: sharedPackage,
+			DeclaredClasses: sorted_set.NewSortedSetFn([]types.ClassName{
+				consumerClass,
+			}, types.ClassNameLess),
+			ImportedClasses: sorted_set.NewSortedSetFn([]types.ClassName{
+				topLevelFunction,
+				secondaryClass,
+			}, types.ClassNameLess),
+			Files: sorted_set.NewSortedSet([]string{"Consumer.kt"}),
+		},
+		moduleRoot + "/model": {
+			Name: sharedPackage,
+			DeclaredClasses: sorted_set.NewSortedSetFn([]types.ClassName{
+				secondaryClass,
+			}, types.ClassNameLess),
+			Files: sorted_set.NewSortedSet([]string{"Models.kt"}),
+		},
+		moduleRoot + "/util": {
+			Name: sharedPackage,
+			DeclaredClasses: sorted_set.NewSortedSetFn([]types.ClassName{
+				topLevelFunction,
+			}, types.ClassNameLess),
+			Files: sorted_set.NewSortedSet([]string{"CreditLineUtilities.kt"}),
+		},
+	}
+
+	buildFile := rule.EmptyFile(moduleRoot+"/BUILD.bazel", moduleRoot)
+	result := language.GenerateResult{}
+	jLang.emitModuleProductionLibraries(
+		language.GenerateArgs{Config: c, File: buildFile, Rel: moduleRoot},
+		rootConfig,
+		sorted_set.NewSortedSet([]string{}),
+		"",
+		"",
+		&result,
+		jLang.logger,
+	)
+
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	rc := testRemoteCache(nil)
+	var consumerRule *rule.Rule
+	var consumerResolveInput types.ResolveInput
+	for i, generatedRule := range result.Gen {
+		generatedRule.Insert(buildFile)
+		ix.AddRule(c, generatedRule, buildFile)
+		if generatedRule.Name() == "consumer" {
+			consumerRule = generatedRule
+			consumerResolveInput = result.Imports[i].(types.ResolveInput)
+		}
+	}
+	if consumerRule == nil {
+		t.Fatal("consumer rule was not generated")
+	}
+	ix.Finish()
+
+	mrslv.Resolver(consumerRule, "").Resolve(c, ix, rc, consumerRule, consumerResolveInput, label.New("", moduleRoot, "consumer"))
+
+	if got := consumerRule.AttrStrings("deps"); len(got) != 0 {
+		t.Errorf("deps mismatch: got %v, want []", got)
+	}
+	got := consumerRule.AttrStrings("associates")
+	want := []string{":model", ":util"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("associates mismatch: got %v, want %v", got, want)
 	}
 }
 
