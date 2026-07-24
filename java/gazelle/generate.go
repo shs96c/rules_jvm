@@ -73,6 +73,33 @@ func addAnnotationProcessorClassesAndExtraImports(
 	}
 }
 
+// isOwnedByModuleRoot reports whether candidateRel belongs to the aggregate
+// rooted at moduleRootRel. A package-granularity subtree or a nested aggregate
+// root owns its own sources and must not also be folded into the parent module.
+func isOwnedByModuleRoot(cfgs javaconfig.Configs, candidateRel, moduleRootRel string) bool {
+	if candidateRel != moduleRootRel && moduleRootRel != "" && !strings.HasPrefix(candidateRel, moduleRootRel+"/") {
+		return false
+	}
+
+	for current := candidateRel; current != moduleRootRel; {
+		cfg, ok := cfgs[current]
+		if !ok || cfg.ModuleGranularity() == "package" || cfg.IsModuleRoot() {
+			return false
+		}
+
+		parent := path.Dir(current)
+		if parent == "." {
+			parent = ""
+		}
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
+
+	return true
+}
+
 type separateJavaTestReasons struct {
 	attributes map[string]bzl.Expr
 	wrapper    string
@@ -233,7 +260,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 
 	if aggregateAtRoot {
 		for mRel, mJavaPkg := range l.javaPackageCache {
-			if !strings.HasPrefix(mRel, args.Rel) {
+			if !isOwnedByModuleRoot(cfgs, mRel, args.Rel) {
 				continue
 			}
 			allPackageNames.Add(mJavaPkg.Name)
@@ -590,9 +617,10 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 // pointing at that group's label, which works because each group registers the packages
 // it owns.
 func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg *javaconfig.Config, likelyLocalClassNames *sorted_set.SortedSet[string], resourcesDirectRef, resourcesRuntimeDep string, res *language.GenerateResult, log zerolog.Logger) {
+	cfgs := args.Config.Exts[languageName].(javaconfig.Configs)
 	productionPackagesByDir := make(map[string]*java.Package)
 	for mRel, mJavaPkg := range l.javaPackageCache {
-		if !strings.HasPrefix(mRel, args.Rel) || mJavaPkg.TestPackage {
+		if !isOwnedByModuleRoot(cfgs, mRel, args.Rel) || mJavaPkg.TestPackage {
 			continue
 		}
 		if mJavaPkg.Files == nil || mJavaPkg.Files.Len() == 0 {
