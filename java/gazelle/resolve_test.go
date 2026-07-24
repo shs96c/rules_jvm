@@ -790,6 +790,168 @@ func TestKotlinExportsAreAlsoCompileDeps(t *testing.T) {
 	}
 }
 
+func TestKotlinMavenCompileCompanions(t *testing.T) {
+	tests := []struct {
+		name          string
+		kind          string
+		src           string
+		importedClass string
+		wantDeps      []string
+		wantNoErrors  bool
+	}{
+		{
+			name:          "exact JVM-owned top-level function",
+			kind:          "kt_jvm_library",
+			src:           "Consumer.kt",
+			importedClass: "io.mockk.every",
+			wantDeps: []string{
+				"@maven//:io_mockk_mockk_dsl_jvm",
+				"@maven//:io_mockk_mockk_jvm",
+			},
+		},
+		{
+			name:         "package-only wildcard import",
+			kind:         "kt_jvm_library",
+			src:          "Consumer.kt",
+			wantNoErrors: true,
+			wantDeps: []string{
+				"@maven//:io_mockk_mockk_dsl_jvm",
+				"@maven//:io_mockk_mockk_jvm",
+			},
+		},
+		{
+			name:          "DSL-owned symbol does not pull JVM artifact backwards",
+			kind:          "kt_jvm_library",
+			src:           "Consumer.kt",
+			importedClass: "io.mockk.Runs",
+			wantDeps:      []string{"@maven//:io_mockk_mockk_dsl_jvm"},
+		},
+		{
+			name:          "Java resolution is unchanged",
+			kind:          "java_library",
+			src:           "Consumer.java",
+			importedClass: "io.mockk.every",
+			wantDeps:      []string{"@maven//:io_mockk_mockk_jvm"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, langs, _ := testConfig(t)
+			mrslv, exts := InitTestResolversAndExtensions(langs)
+			var javaLanguage *javaLang
+			for _, lang := range langs {
+				if l, ok := lang.(*javaLang); ok {
+					javaLanguage = l
+					break
+				}
+			}
+			if javaLanguage == nil {
+				t.Fatal("Java language not initialized")
+			}
+			javaLanguage.mavenResolver = &mockKCompileResolver{}
+
+			ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+			ix.Finish()
+			r := rule.NewRule(tc.kind, "consumer")
+			r.SetAttr("srcs", []string{tc.src})
+			emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+			importedPackages := sorted_set.NewSortedSetFn(
+				[]types.PackageName{types.NewPackageName("io.mockk")},
+				types.PackageNameLess,
+			)
+			emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+			importedClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+			if tc.importedClass != "" {
+				className, err := types.ParseClassName(tc.importedClass)
+				if err != nil {
+					t.Fatal(err)
+				}
+				importedClasses.Add(*className)
+			}
+			resolveInput := types.ResolveInput{
+				PackageNames:         emptyPackages,
+				ImportedPackageNames: importedPackages,
+				ImportedClasses:      importedClasses,
+				ExportedPackageNames: emptyPackages,
+				ExportedClassNames:   emptyClasses,
+				AnnotationProcessors: emptyClasses,
+			}
+
+			mrslv.Resolver(r, "").Resolve(
+				c,
+				ix,
+				testRemoteCache(nil),
+				r,
+				resolveInput,
+				label.New("", "", r.Name()),
+			)
+
+			if got := r.AttrStrings("deps"); !reflect.DeepEqual(got, tc.wantDeps) {
+				t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, tc.wantDeps)
+			}
+			if tc.wantNoErrors && javaLanguage.hasHadErrors {
+				t.Error("package-only compile group was reported as unresolved")
+			}
+		})
+	}
+}
+
+type mockKCompileResolver struct{}
+
+func (*mockKCompileResolver) Resolve(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
+	if pkg.Name == "io.mockk" {
+		return label.NoLabel, &maven.MultipleExternalImportsError{
+			PackageName: pkg.Name,
+			PossiblePackages: []string{
+				"@maven//:io_mockk_mockk_dsl_jvm",
+				"@maven//:io_mockk_mockk_jvm",
+			},
+		}
+	}
+	return label.NoLabel, &maven.NoExternalImportsError{PackageName: pkg.Name}
+}
+
+func (*mockKCompileResolver) ResolveClass(className types.ClassName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
+	switch className.FullyQualifiedClassName() {
+	case "io.mockk.every", "io.mockk.MockKAnnotations":
+		return label.New(mavenRepositoryName, "", "io_mockk_mockk_jvm"), nil
+	case "io.mockk.Runs", "io.mockk.MockKStubScope":
+		return label.New(mavenRepositoryName, "", "io_mockk_mockk_dsl_jvm"), nil
+	default:
+		return label.NoLabel, nil
+	}
+}
+
+func (*mockKCompileResolver) ResolveCompilePackage(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) ([]label.Label, error) {
+	if pkg.Name != "io.mockk" {
+		return nil, &maven.NoExternalImportsError{PackageName: pkg.Name}
+	}
+	return []label.Label{
+		label.New(mavenRepositoryName, "", "io_mockk_mockk_jvm"),
+		label.New(mavenRepositoryName, "", "io_mockk_mockk_dsl_jvm"),
+	}, nil
+}
+
+func (*mockKCompileResolver) CompileCompanions(pkg types.PackageName, selected []label.Label, excludedArtifacts map[string]struct{}, mavenRepositoryName string) []label.Label {
+	if pkg.Name != "io.mockk" {
+		return nil
+	}
+	dsl := label.New(mavenRepositoryName, "", "io_mockk_mockk_dsl_jvm")
+	jvm := label.New(mavenRepositoryName, "", "io_mockk_mockk_jvm")
+	for _, l := range selected {
+		if l == jvm {
+			return []label.Label{jvm, dsl}
+		}
+	}
+	for _, l := range selected {
+		if l == dsl {
+			return []label.Label{dsl}
+		}
+	}
+	return nil
+}
+
 func testRemoteCache(knownRepos []repo.Repo) *repo.RemoteCache {
 	rc, _ := repo.NewRemoteCache(knownRepos)
 	rc.RepoRootForImportPath = stubRepoRootForImportPath
@@ -1902,6 +2064,50 @@ func TestOwnedPackageDoesNotResolveToPublishedWorkspaceMavenArtifact(t *testing.
 	}
 }
 
+func TestOwnedPackageDoesNotAddPublishedWorkspaceMavenCompileCompanion(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	ix.Finish()
+
+	var jLang *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			jLang = jl
+			break
+		}
+	}
+	if jLang == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+	jLang.mavenResolver = &publishedWorkspaceCompileResolver{}
+
+	from := label.New("", "service/src/main/kotlin/com/example/finance", "actions")
+	c.Exts[languageName].(javaconfig.Configs)[from.Pkg] = javaconfig.New(c.RepoRoot)
+
+	javaPackage := types.NewPackageName("com.example.finance")
+	consumer := rule.NewRule("kt_jvm_library", "actions")
+	consumer.SetAttr("srcs", []string{"Actions.kt"})
+	consumer.SetAttr("deps", []string{"@maven//:com_example_finance_service"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	resolveInput := types.ResolveInput{
+		PackageNames:         sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses:      emptyClasses,
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+
+	mrslv.Resolver(consumer, "").Resolve(c, ix, testRemoteCache(nil), consumer, resolveInput, from)
+
+	want := []string{"@maven//:com_example_finance_service"}
+	if got := consumer.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
 func TestMavenLabelLooksLikeWorkspaceOwner(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -1970,6 +2176,24 @@ func (*publishedWorkspaceMavenResolver) ResolveClass(className types.ClassName, 
 		return label.New(mavenRepositoryName, "", "com_example_finance_common"), nil
 	}
 	return label.NoLabel, nil
+}
+
+type publishedWorkspaceCompileResolver struct {
+	publishedWorkspaceMavenResolver
+}
+
+func (*publishedWorkspaceCompileResolver) ResolveCompilePackage(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) ([]label.Label, error) {
+	return nil, &maven.NoExternalImportsError{PackageName: pkg.Name}
+}
+
+func (*publishedWorkspaceCompileResolver) CompileCompanions(pkg types.PackageName, selected []label.Label, excludedArtifacts map[string]struct{}, mavenRepositoryName string) []label.Label {
+	if pkg.Name != "com.example.finance" {
+		return nil
+	}
+	return []label.Label{
+		label.New(mavenRepositoryName, "", "com_example_finance_service"),
+		label.New(mavenRepositoryName, "", "com_example_finance_common"),
+	}
 }
 
 func TestKotlinTestAssociatesOnlyKotlinProductionLibrary(t *testing.T) {
