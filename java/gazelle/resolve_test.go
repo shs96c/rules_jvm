@@ -85,6 +85,360 @@ func TestSetLabelAttrIncludingExistingValuesPreservesPlugins(t *testing.T) {
 	}
 }
 
+func TestResolveSingleClassPrefersSelfCandidate(t *testing.T) {
+	javaPackage := types.NewPackageName("com.example.duplicate")
+	className := types.NewClassName(javaPackage, "Duplicate")
+	from := label.New("java", "consumer", "app")
+	other := label.New("java", "provider_b", "lib")
+
+	for name, self := range map[string]label.Label{
+		"explicit current repository spelling": label.New("java", "consumer", "app"),
+		"absolute workspace spelling":          label.New("", "consumer", "app"),
+		"relative spelling":                    {Name: "app", Relative: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lang := newTestJavaLang(t)
+			resolver := NewResolver(&lang)
+			resolver.classIndex[javaPackage] = &packageClassIndex{
+				prod: map[string][]label.Label{
+					"Duplicate": {other, self},
+				},
+				test: make(map[string][]label.Label),
+			}
+
+			consumer := rule.NewRule("java_library", "app")
+			consumer.SetAttr("deps", []string{"@java//provider_b:lib"})
+			c, _, _ := testConfig(t)
+			c.RepoName = "java"
+			pc := javaconfig.New(".")
+			pc.SetResolveToJavaExports(false)
+			preferences := collectExistingLabelPreferences(consumer, "deps", c.RepoName, from)
+
+			got := resolver.resolveSingleClass(
+				c,
+				pc,
+				className,
+				nil,
+				from,
+				false,
+				preferences,
+			)
+			want := simplifyLabel(c.RepoName, self, from)
+			if got != want {
+				t.Errorf("resolveSingleClass() = %s, want self candidate %s", got, want)
+			}
+		})
+	}
+}
+
+func TestResolveSingleClassPrefersConsumerExistingCandidate(t *testing.T) {
+	javaPackage := types.NewPackageName("com.example.duplicate")
+	className := types.NewClassName(javaPackage, "Duplicate")
+	from := label.New("java", "consumer", "app")
+	providerA := label.New("", "consumer", "provider_a")
+	providerB := label.New("java", "provider_b", "lib")
+
+	for name, tc := range map[string]struct {
+		existing []string
+		want     label.Label
+	}{
+		"relative native edge selects candidate": {
+			existing: []string{":provider_a"},
+			want:     label.Label{Name: "provider_a", Relative: true},
+		},
+		"explicit current repository edge selects candidate": {
+			existing: []string{"@java//provider_b:lib"},
+			want:     label.New("", "provider_b", "lib"),
+		},
+		"no existing edge remains ambiguous": {
+			want: label.NoLabel,
+		},
+		"stale non-candidate edge remains ambiguous": {
+			existing: []string{"//stale:lib"},
+			want:     label.NoLabel,
+		},
+		"multiple matching existing edges remain ambiguous": {
+			existing: []string{":provider_a", "//provider_b:lib"},
+			want:     label.NoLabel,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lang := newTestJavaLang(t)
+			resolver := NewResolver(&lang)
+			resolver.classIndex[javaPackage] = &packageClassIndex{
+				prod: map[string][]label.Label{
+					"Duplicate": {providerA, providerB},
+				},
+				test: make(map[string][]label.Label),
+			}
+
+			consumer := rule.NewRule("java_library", "app")
+			if len(tc.existing) > 0 {
+				consumer.SetAttr("deps", tc.existing)
+			}
+			c, _, _ := testConfig(t)
+			c.RepoName = "java"
+			pc := javaconfig.New(".")
+			pc.SetResolveToJavaExports(false)
+			preferences := collectExistingLabelPreferences(consumer, "deps", c.RepoName, from)
+
+			got := resolver.resolveSingleClass(
+				c,
+				pc,
+				className,
+				nil,
+				from,
+				false,
+				preferences,
+			)
+			if got.String() != tc.want.String() {
+				t.Errorf("resolveSingleClass() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// splitOwnerPackageMavenResolver reports a package owned by multiple Maven
+// artifacts whose classes are absent from the class index, mirroring published
+// artifacts that bundle the same generated code.
+type splitOwnerPackageMavenResolver struct{}
+
+func (*splitOwnerPackageMavenResolver) Resolve(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
+	if pkg.Name == "com.example.generated" {
+		return label.NoLabel, &maven.MultipleExternalImportsError{
+			PackageName: pkg.Name,
+			PossiblePackages: []string{
+				"@maven//:com_example_client",
+				"@maven//:com_example_embedded",
+			},
+		}
+	}
+	return label.NoLabel, &maven.NoExternalImportsError{PackageName: pkg.Name}
+}
+
+func (*splitOwnerPackageMavenResolver) ResolveClass(className types.ClassName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
+	return label.NoLabel, nil
+}
+
+// TestResolveSingleClassKeepsExistingMavenOwnerOverCrossResolver covers a class
+// with no in-repo provider whose package is owned by an existing Maven
+// dependency: a cross-resolver candidate the rule has never compiled against
+// must not replace that owner, which would duplicate the package's classes
+// across two classpath jars.
+func TestResolveSingleClassKeepsExistingMavenOwnerOverCrossResolver(t *testing.T) {
+	javaPackage := types.NewPackageName("com.example.generated")
+	className := types.NewClassName(javaPackage, "GeneratedMessage")
+	from := label.New("", "consumer", "app")
+	crossLabel := label.New("com_example_protos", "gen", "generated_java_proto")
+
+	for name, tc := range map[string]struct {
+		existing []string
+		want     label.Label
+	}{
+		"existing maven owner outranks cross-resolver candidate": {
+			existing: []string{"@maven//:com_example_client"},
+			want:     label.New("maven", "", "com_example_client"),
+		},
+		"cross-resolver candidate kept when already a dependency": {
+			existing: []string{"@com_example_protos//gen:generated_java_proto"},
+			want:     crossLabel,
+		},
+		"cross-resolver candidate kept without existing owner": {
+			want: crossLabel,
+		},
+		"multiple existing owners keep cross-resolver candidate": {
+			existing: []string{"@maven//:com_example_client", "@maven//:com_example_embedded"},
+			want:     crossLabel,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lang := newTestJavaLang(t)
+			lang.mavenResolver = &splitOwnerPackageMavenResolver{}
+			resolver := NewResolver(&lang)
+
+			ix := resolve.NewRuleIndex(nil, &fakeClassCrossResolver{
+				classToLabel: map[string]label.Label{
+					"com.example.generated.GeneratedMessage": crossLabel,
+				},
+			})
+			ix.Finish()
+
+			consumer := rule.NewRule("java_library", "app")
+			if len(tc.existing) > 0 {
+				consumer.SetAttr("deps", tc.existing)
+			}
+			c, _, _ := testConfig(t)
+			pc := javaconfig.New(".")
+			pc.SetResolveToJavaExports(false)
+			preferences := collectExistingLabelPreferences(consumer, "deps", c.RepoName, from)
+
+			got := resolver.resolveSingleClass(c, pc, className, ix, from, false, preferences)
+			if got.String() != tc.want.String() {
+				t.Errorf("resolveSingleClass() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// singleOwnerPackageMavenResolver reports a package owned by exactly one Maven
+// artifact whose classes are absent from the class index, mirroring a production
+// lockfile, which carries no class-level data.
+type singleOwnerPackageMavenResolver struct{}
+
+func (*singleOwnerPackageMavenResolver) Resolve(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
+	if pkg.Name == "com.example.generated" {
+		return label.New("maven", "", "com_example_client"), nil
+	}
+	return label.NoLabel, &maven.NoExternalImportsError{PackageName: pkg.Name}
+}
+
+func (*singleOwnerPackageMavenResolver) ResolveClass(className types.ClassName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
+	return label.NoLabel, nil
+}
+
+// TestPopulateAttrKeepsExistingMavenPackageOwnerOverCrossResolver covers a
+// package that resolves unambiguously to a Maven dependency the rule already
+// compiles against, while a cross-resolver also claims its individual classes
+// (the Maven owner never appears in the class-export cache, so every class
+// takes the per-class fallback): the generated-code candidate must not replace
+// the existing owner. Existing dependencies reach resolution through
+// ResolveInput, mirroring the production flow where generated rules never
+// carry the checked-in attributes.
+func TestPopulateAttrKeepsExistingMavenPackageOwnerOverCrossResolver(t *testing.T) {
+	javaPackage := types.NewPackageName("com.example.generated")
+	className := types.NewClassName(javaPackage, "GeneratedMessage")
+	from := label.New("", "consumer", "app")
+	crossLabel := label.New("com_example_protos", "gen", "generated_java_proto")
+
+	for name, tc := range map[string]struct {
+		existing []string
+		want     []string
+	}{
+		"existing maven owner survives cross-resolver class claim": {
+			existing: []string{"@maven//:com_example_client"},
+			want:     []string{"@maven//:com_example_client"},
+		},
+		"cross-resolver candidate kept when already a dependency": {
+			existing: []string{"@com_example_protos//gen:generated_java_proto"},
+			want:     []string{"@com_example_protos//gen:generated_java_proto"},
+		},
+		"cross-resolver candidate wins for a new import": {
+			want: []string{"@com_example_protos//gen:generated_java_proto"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lang := newTestJavaLang(t)
+			lang.mavenResolver = &singleOwnerPackageMavenResolver{}
+			resolver := NewResolver(&lang)
+
+			ix := resolve.NewRuleIndex(nil, &fakeClassCrossResolver{
+				classToLabel: map[string]label.Label{
+					"com.example.generated.GeneratedMessage": crossLabel,
+				},
+			})
+			ix.Finish()
+
+			consumer := rule.NewRule("java_library", "app")
+			consumer.SetAttr("srcs", []string{"App.java"})
+			existingDeps := sorted_set.NewSortedSetFn([]label.Label{}, sorted_set.LabelLess)
+			for _, raw := range tc.existing {
+				l, err := label.Parse(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				existingDeps.Add(l)
+			}
+			c, _, _ := testConfig(t)
+			pc := javaconfig.New(".")
+			pc.SetResolveToJavaExports(false)
+
+			requiredPackages := sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess)
+			importedClasses := sorted_set.NewSortedSetFn([]types.ClassName{className}, types.ClassNameLess)
+
+			resolver.populateAttr(c, pc, consumer, "deps", requiredPackages, importedClasses, ix, false, from, nil, existingDeps)
+
+			if got := consumer.AttrStrings("deps"); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("populateAttr() deps = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPackageResolutionKeepsExistingMavenOwnerOverCrossResolver covers the
+// package-level variant of the guard: an external plugin claims the whole
+// package through CrossResolve, so resolution never reaches the class-level
+// paths. Index lookups run before the Maven resolver, so without the guard
+// the plugin's label silently replaces the checked-in Maven dependency.
+func TestPackageResolutionKeepsExistingMavenOwnerOverCrossResolver(t *testing.T) {
+	javaPackage := types.NewPackageName("com.example.generated")
+	className := types.NewClassName(javaPackage, "GeneratedMessage")
+	from := label.New("", "consumer", "app")
+	crossLabel := label.New("com_example_protos", "gen", "generated_java_proto")
+	inRepoLabel := label.New("", "newhome", "lib")
+
+	for name, tc := range map[string]struct {
+		packageOwner label.Label
+		existing     []string
+		want         []string
+	}{
+		"existing maven owner survives cross-resolver package claim": {
+			packageOwner: crossLabel,
+			existing:     []string{"@maven//:com_example_client"},
+			want:         []string{"@maven//:com_example_client"},
+		},
+		"cross-resolver candidate kept when already a dependency": {
+			packageOwner: crossLabel,
+			existing:     []string{"@com_example_protos//gen:generated_java_proto"},
+			want:         []string{"@com_example_protos//gen:generated_java_proto"},
+		},
+		"cross-resolver candidate wins for a new import": {
+			packageOwner: crossLabel,
+			want:         []string{"@com_example_protos//gen:generated_java_proto"},
+		},
+		"in-repo provider outranks an existing maven dependency": {
+			packageOwner: inRepoLabel,
+			existing:     []string{"@maven//:com_example_client"},
+			want:         []string{"//newhome:lib"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lang := newTestJavaLang(t)
+			lang.mavenResolver = &singleOwnerPackageMavenResolver{}
+			resolver := NewResolver(&lang)
+
+			ix := resolve.NewRuleIndex(nil, &fakeClassCrossResolver{
+				classToLabel: map[string]label.Label{
+					"com.example.generated": tc.packageOwner,
+				},
+			})
+			ix.Finish()
+
+			consumer := rule.NewRule("java_library", "app")
+			consumer.SetAttr("srcs", []string{"App.java"})
+			existingDeps := sorted_set.NewSortedSetFn([]label.Label{}, sorted_set.LabelLess)
+			for _, raw := range tc.existing {
+				l, err := label.Parse(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				existingDeps.Add(l)
+			}
+			c, _, _ := testConfig(t)
+			pc := javaconfig.New(".")
+			pc.SetResolveToJavaExports(false)
+
+			requiredPackages := sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess)
+			importedClasses := sorted_set.NewSortedSetFn([]types.ClassName{className}, types.ClassNameLess)
+
+			resolver.populateAttr(c, pc, consumer, "deps", requiredPackages, importedClasses, ix, false, from, nil, existingDeps)
+
+			if got := consumer.AttrStrings("deps"); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("populateAttr() deps = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestImports(t *testing.T) {
 	type buildFile struct {
 		rel, content string

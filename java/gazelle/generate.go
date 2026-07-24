@@ -1339,6 +1339,8 @@ func (l javaLang) generateJavaLibrary(args generateJavaLibraryArgs) {
 		ExportedPackageNames: args.Exports,
 		ExportedClassNames:   exportedClassNames,
 		AnnotationProcessors: args.AnnotationProcessors,
+		ExistingDeps:         l.collectExistingLabelAttr(args.Name, "deps", args.File),
+		ExistingExports:      l.collectExistingLabelAttr(args.Name, "exports", args.File),
 	}
 	args.Result.Imports = append(args.Result.Imports, resolveInput)
 
@@ -1557,6 +1559,7 @@ func (l javaLang) generateJavaTest(file *rule.File, pathToPackageRelativeToBazel
 		ImportedPackageNames: testImports,
 		ImportedClasses:      importedClasses,
 		AnnotationProcessors: annotationProcessorClasses,
+		ExistingDeps:         l.collectExistingLabelAttr(testName, "deps", file),
 	}
 	res.Imports = append(res.Imports, resolveInput)
 }
@@ -1630,6 +1633,7 @@ func (l javaLang) generateJavaTestSuite(file *rule.File, name string, srcs []str
 		ImportedPackageNames: suiteImports,
 		ImportedClasses:      importedClasses,
 		AnnotationProcessors: annotationProcessorClasses,
+		ExistingDeps:         l.collectExistingLabelAttr(name, "deps", file),
 	}
 	res.Imports = append(res.Imports, resolveInput)
 }

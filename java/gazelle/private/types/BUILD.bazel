@@ -7,6 +7,7 @@ go_library(
     visibility = ["//visibility:public"],
     deps = [
         "//java/gazelle/private/sorted_set",
+        "@bazel_gazelle//label",
     ],
 )
 

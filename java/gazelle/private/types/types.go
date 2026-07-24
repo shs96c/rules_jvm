@@ -6,6 +6,7 @@ import (
 	"unicode"
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
+	"github.com/bazelbuild/bazel-gazelle/label"
 )
 
 type PackageName struct {
@@ -112,6 +113,12 @@ type ResolveInput struct {
 	ExportedPackageNames *sorted_set.SortedSet[PackageName]
 	ExportedClassNames   *sorted_set.SortedSet[ClassName]
 	AnnotationProcessors *sorted_set.SortedSet[ClassName]
+	// ExistingDeps and ExistingExports carry the checked-in attribute values into
+	// the resolve phase, where they break ties between otherwise ambiguous
+	// providers. Resolution happens on generated rules, which never carry the
+	// checked-in attributes themselves.
+	ExistingDeps    *sorted_set.SortedSet[label.Label]
+	ExistingExports *sorted_set.SortedSet[label.Label]
 }
 
 type ResolvableJavaPackage struct {

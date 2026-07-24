@@ -148,8 +148,8 @@ func (jr *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 		}
 	}
 
-	jr.populateAttr(c, packageConfig, r, "deps", resolveInput.ImportedPackageNames, resolveInput.ImportedClasses, ix, isTestRule, from, resolveInput.PackageNames)
-	jr.populateAttr(c, packageConfig, r, "exports", resolveInput.ExportedPackageNames, resolveInput.ExportedClassNames, ix, isTestRule, from, resolveInput.PackageNames)
+	jr.populateAttr(c, packageConfig, r, "deps", resolveInput.ImportedPackageNames, resolveInput.ImportedClasses, ix, isTestRule, from, resolveInput.PackageNames, resolveInput.ExistingDeps)
+	jr.populateAttr(c, packageConfig, r, "exports", resolveInput.ExportedPackageNames, resolveInput.ExportedClassNames, ix, isTestRule, from, resolveInput.PackageNames, resolveInput.ExistingExports)
 
 	jr.populateAssociatesAttr(c, ix, resolveInput, r, isTestRule, from)
 
@@ -302,8 +302,14 @@ func findPackageRuleWithOverride(c *config.Config, packageName types.PackageName
 	return resolve.FindRuleWithOverride(c, importSpec, languageName)
 }
 
-func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rule.Rule, attrName string, requiredPackageNames *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], ix *resolve.RuleIndex, isTestRule bool, from label.Label, ownPackageNames *sorted_set.SortedSet[types.PackageName]) {
+func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rule.Rule, attrName string, requiredPackageNames *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], ix *resolve.RuleIndex, isTestRule bool, from label.Label, ownPackageNames *sorted_set.SortedSet[types.PackageName], existingLabels *sorted_set.SortedSet[label.Label]) {
 	labels := sorted_set.NewSortedSetFn[label.Label]([]label.Label{}, sorted_set.LabelLess)
+	preferredExistingLabels := collectExistingLabelPreferences(r, attrName, c.RepoName, from)
+	if existingLabels != nil {
+		for _, l := range existingLabels.SortedSlice() {
+			preferredExistingLabels[normalizeLabelPreference(l, c.RepoName, from)] = struct{}{}
+		}
+	}
 
 	// Build a map of package -> classes for efficient lookup during class-level resolution
 	classesByPackage := make(map[types.PackageName][]types.ClassName)
@@ -371,7 +377,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					l = label.NoLabel
 				}
 				if l == label.NoLabel {
-					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule)
+					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule, preferredExistingLabels)
 				}
 				if l == label.NoLabel {
 					l, err = jr.resolveMavenWholePackageClass(pc, className)
@@ -387,7 +393,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 		}
 
 		// Try package-level resolution first (fast path)
-		dep, ambiguous := jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
+		dep, ambiguous := jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses, preferredExistingLabels)
 		if dep != label.NoLabel {
 			resolvedPackageDep := simplifyLabel(c.RepoName, dep, from)
 			if len(classesByPackage[imp]) == 0 {
@@ -418,7 +424,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					}
 					l = label.NoLabel
 				}
-				if l := jr.resolveClassFromCrossResolver(c, pc, className, ix, from); l != label.NoLabel {
+				if l := jr.resolveClassFromCrossResolver(c, pc, className, ix, from, preferredExistingLabels); l != label.NoLabel {
 					labels.Add(l)
 					continue
 				}
@@ -426,7 +432,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					// A test may import a class from a testonly library (e.g. a testFixtures source
 					// set) whose package the resolved production target also owns; the in-repo class
 					// index includes testonly providers for test rules.
-					if l := jr.resolveSingleClass(c, pc, className, ix, from, true); l != label.NoLabel {
+					if l := jr.resolveSingleClass(c, pc, className, ix, from, true, preferredExistingLabels); l != label.NoLabel {
 						labels.Add(l)
 						continue
 					}
@@ -483,7 +489,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					l = label.NoLabel
 				}
 				if l == label.NoLabel {
-					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule)
+					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule, preferredExistingLabels)
 				}
 				if l == label.NoLabel && isTestRule {
 					l = jr.resolveTestSuiteHelperClass(c, imp, className, ix, from)
@@ -532,7 +538,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 				labels.Add(simplifyLabel(c.RepoName, l, from))
 				continue
 			}
-			if l := jr.resolveSingleClass(c, pc, className, ix, from, isTestRule); l != label.NoLabel {
+			if l := jr.resolveSingleClass(c, pc, className, ix, from, isTestRule, preferredExistingLabels); l != label.NoLabel {
 				labels.Add(simplifyLabel(c.RepoName, l, from))
 				continue
 			}
@@ -552,7 +558,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 				}
 				l = label.NoLabel
 			}
-			if l := jr.resolveClassFromCrossResolver(c, pc, className, ix, from); l != label.NoLabel {
+			if l := jr.resolveClassFromCrossResolver(c, pc, className, ix, from, preferredExistingLabels); l != label.NoLabel {
 				labels.Add(l)
 				continue
 			}
@@ -700,6 +706,87 @@ func isGenericWorkspaceToken(token string) bool {
 	}
 }
 
+// normalizeLabelPreference gives relative, absolute-current-repository, and
+// explicit-current-repository spellings the same identity for comparison.
+func normalizeLabelPreference(l label.Label, repoName string, from label.Label) label.Label {
+	l = l.Abs(from.Repo, from.Pkg)
+	if l.Repo == repoName || l.Repo == from.Repo {
+		l.Repo = ""
+	}
+	l.Relative = false
+	l.Canonical = false
+	return l
+}
+
+// collectExistingLabelPreferences snapshots a managed attribute before resolution
+// replaces it. Existing edges are only tie-breakers between otherwise ambiguous
+// exact-class workspace providers; they are not copied into the generated attribute.
+func collectExistingLabelPreferences(r *rule.Rule, attrName, repoName string, from label.Label) map[label.Label]struct{} {
+	preferences := make(map[label.Label]struct{})
+	for _, raw := range r.AttrStrings(attrName) {
+		l, err := label.Parse(raw)
+		if err != nil {
+			continue
+		}
+		preferences[normalizeLabelPreference(l, repoName, from)] = struct{}{}
+	}
+	return preferences
+}
+
+// selfClassCandidate returns the candidate owned by the rule being resolved.
+// Local ownership takes precedence over preferences for another provider.
+func selfClassCandidate(candidates []label.Label, repoName string, from label.Label) label.Label {
+	normalizedFrom := normalizeLabelPreference(from, repoName, from)
+	for _, candidate := range candidates {
+		if normalizeLabelPreference(candidate, repoName, from) == normalizedFrom {
+			return candidate
+		}
+	}
+	return label.NoLabel
+}
+
+// preferredExistingMavenPackageOwner returns the existing dependency that Maven's
+// package index lists as an owner of pkg, provided exactly one existing
+// dependency qualifies.
+func (jr *Resolver) preferredExistingMavenPackageOwner(c *config.Config, pc *javaconfig.Config, pkg types.PackageName, from label.Label, preferences map[label.Label]struct{}) label.Label {
+	if len(preferences) == 0 {
+		return label.NoLabel
+	}
+	var candidates []label.Label
+	l, err := jr.lang.mavenResolver.Resolve(pkg, pc.ExcludedArtifacts(), pc.MavenRepositoryName())
+	if err == nil && l != label.NoLabel {
+		candidates = append(candidates, l)
+	}
+	var multipleExternal *maven.MultipleExternalImportsError
+	if errors.As(err, &multipleExternal) {
+		for _, possible := range multipleExternal.PossiblePackages {
+			pl, parseErr := label.Parse(possible)
+			if parseErr != nil {
+				continue
+			}
+			candidates = append(candidates, pl)
+		}
+	}
+	return preferredExistingClassCandidate(candidates, preferences, c.RepoName, from)
+}
+
+func preferredExistingClassCandidate(candidates []label.Label, preferences map[label.Label]struct{}, repoName string, from label.Label) label.Label {
+	matches := make(map[label.Label]label.Label)
+	for _, candidate := range candidates {
+		normalized := normalizeLabelPreference(candidate, repoName, from)
+		if _, preferred := preferences[normalized]; preferred {
+			matches[normalized] = candidate
+		}
+	}
+	if len(matches) != 1 {
+		return label.NoLabel
+	}
+	for _, candidate := range matches {
+		return candidate
+	}
+	return label.NoLabel
+}
+
 // setLabelAttrIncludingExistingValues is reserved for hand-owned attributes such as plugins.
 func setLabelAttrIncludingExistingValues(r *rule.Rule, attrName string, labels *sorted_set.SortedSet[label.Label]) {
 	for _, implicitDep := range r.AttrStrings(attrName) {
@@ -732,7 +819,7 @@ func setManagedLabelAttr(r *rule.Rule, attrName string, labels *sorted_set.Sorte
 
 // resolveSinglePackageWithAmbiguity resolves a package import and returns whether there was ambiguity.
 // When ambiguous is true and out is NoLabel, the caller should attempt class-level resolution.
-func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string) (out label.Label, ambiguous bool) {
+func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string, preferredExistingLabels map[label.Label]struct{}) (out label.Label, ambiguous bool) {
 	cacheKey := types.NewResolvableJavaPackage(imp, false, false)
 	importSpec := resolve.ImportSpec{Lang: languageName, Imp: cacheKey.String()}
 	if ol, found := resolve.FindRuleWithOverride(c, importSpec, languageName); found {
@@ -754,7 +841,23 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 	}
 
 	if len(matches) == 1 {
-		return matches[0].Label, false
+		l := matches[0].Label
+		// An existing dependency that Maven indexes as an owner of the package is
+		// kept over an external candidate the rule has never compiled against:
+		// index lookups run before the Maven resolver, so without this check a
+		// generated-code plugin's package claim silently replaces the checked-in
+		// Maven dependency. In-repo providers still win so code moving into the
+		// workspace repoints as usual, and explicit resolve directives return
+		// before this check.
+		if l.Repo != "" && l.Repo != c.RepoName {
+			simplified := simplifyLabel(c.RepoName, l, from)
+			if _, ok := preferredExistingLabels[normalizeLabelPreference(simplified, c.RepoName, from)]; !ok {
+				if existing := jr.preferredExistingMavenPackageOwner(c, pc, imp, from, preferredExistingLabels); existing != label.NoLabel {
+					return existing, false
+				}
+			}
+		}
+		return l, false
 	}
 
 	if len(matches) > 1 {
@@ -869,7 +972,7 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 }
 
 func (jr *Resolver) resolveSinglePackage(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string) (out label.Label) {
-	out, _ = jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
+	out, _ = jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses, nil)
 	return out
 }
 
@@ -950,7 +1053,7 @@ func (jr *Resolver) buildPackageClassIndex(c *config.Config, pkg types.PackageNa
 	return pci
 }
 
-func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, className types.ClassName, ix *resolve.RuleIndex, from label.Label, isTestRule bool) (out label.Label) {
+func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, className types.ClassName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, preferredExistingLabels map[label.Label]struct{}) (out label.Label) {
 	imp := className.FullyQualifiedClassName()
 	// Check for manual override first
 	if ol, found := findClassRuleWithOverride(c, className); found {
@@ -976,11 +1079,15 @@ func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, 
 	if len(candidates) == 0 {
 		// No in-repo provider for this class. Mirror Gazelle's index-then-CrossResolve
 		// ordering at class granularity: consult external plugins via the cross-resolver.
-		return jr.resolveClassFromCrossResolver(c, pc, className, ix, from)
+		return jr.resolveClassFromCrossResolver(c, pc, className, ix, from, preferredExistingLabels)
 	}
 
 	if len(candidates) == 1 {
 		return simplifyLabel(c.RepoName, candidates[0], from)
+	}
+
+	if self := selfClassCandidate(candidates, c.RepoName, from); self != label.NoLabel {
+		return simplifyLabel(c.RepoName, self, from)
 	}
 
 	// Multiple candidates - try java_export narrowing
@@ -995,6 +1102,10 @@ func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, 
 		}
 	}
 
+	if preferred := preferredExistingClassCandidate(candidates, preferredExistingLabels, c.RepoName, from); preferred != label.NoLabel {
+		return simplifyLabel(c.RepoName, preferred, from)
+	}
+
 	// Still ambiguous - log error
 	labels := make([]string, 0, len(candidates))
 	for _, l := range candidates {
@@ -1005,6 +1116,7 @@ func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, 
 	jr.lang.logger.Error().
 		Str("class", imp).
 		Strs("targets", labels).
+		Stringer("from", from).
 		Msg("resolveSingleClass found MULTIPLE providers for class")
 
 	return label.NoLabel
@@ -1112,8 +1224,11 @@ func (jr *Resolver) resolveTestSuiteHelperClass(c *config.Config, imp types.Pack
 // classes in the global RuleIndex, a class-level FindRulesByImportWithConfig always
 // misses the index and falls through to CrossResolve. This lets external plugins
 // (e.g. proto/wire generators) provide class-level resolutions even when an in-repo
-// target owns the enclosing package (a split package).
-func (jr *Resolver) resolveClassFromCrossResolver(c *config.Config, pc *javaconfig.Config, className types.ClassName, ix *resolve.RuleIndex, from label.Label) label.Label {
+// target owns the enclosing package (a split package). An existing dependency that
+// Maven indexes as an owner of the class's package is kept over a cross-resolver
+// candidate the rule has never compiled against: swapping in a generated-code copy
+// would duplicate the package's classes across two classpath jars.
+func (jr *Resolver) resolveClassFromCrossResolver(c *config.Config, pc *javaconfig.Config, className types.ClassName, ix *resolve.RuleIndex, from label.Label, preferredExistingLabels map[label.Label]struct{}) label.Label {
 	importSpec := resolve.ImportSpec{Lang: languageName, Imp: className.FullyQualifiedClassName()}
 	matches := ix.FindRulesByImportWithConfig(c, importSpec, languageName)
 	if len(matches) == 0 {
@@ -1130,7 +1245,14 @@ func (jr *Resolver) resolveClassFromCrossResolver(c *config.Config, pc *javaconf
 	}
 
 	if candidates.Len() == 1 {
-		return simplifyLabel(c.RepoName, candidates.SortedSlice()[0], from)
+		l := simplifyLabel(c.RepoName, candidates.SortedSlice()[0], from)
+		if _, ok := preferredExistingLabels[normalizeLabelPreference(l, c.RepoName, from)]; ok {
+			return l
+		}
+		if existing := jr.preferredExistingMavenPackageOwner(c, pc, className.PackageName(), from, preferredExistingLabels); existing != label.NoLabel {
+			return simplifyLabel(c.RepoName, existing, from)
+		}
+		return l
 	}
 
 	labelStrings := make([]string, 0, candidates.Len())
