@@ -264,9 +264,10 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				continue
 			}
 			allPackageNames.Add(mJavaPkg.Name)
+			mLocalOuterClassNames := declaredOuterClassNames(mJavaPkg.DeclaredClasses)
 
 			if !mJavaPkg.TestPackage {
-				addNonLocalImportsAndExports(productionJavaImports, productionJavaImportedClasses, nonLocalJavaExports, nonLocalJavaExternalExportedClasses, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, likelyLocalClassNames)
+				addNonLocalImportsAndExports(productionJavaImports, productionJavaImportedClasses, nonLocalJavaExports, nonLocalJavaExternalExportedClasses, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, mLocalOuterClassNames)
 				nonLocalJavaExportedClasses.AddAll(mJavaPkg.DeclaredClasses)
 				for _, f := range mJavaPkg.Files.SortedSlice() {
 					productionJavaFiles.Add(filepath.Join(mRel, f))
@@ -276,7 +277,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				allMains.AddAll(mJavaPkg.Mains)
 			} else {
 				// Tests don't get to export things, as things shouldn't depend on them.
-				addNonLocalImportsAndExports(testJavaImports, testJavaImportedClasses, nil, nil, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, likelyLocalClassNames)
+				addNonLocalImportsAndExports(testJavaImports, testJavaImportedClasses, nil, nil, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, mLocalOuterClassNames)
 				for _, f := range mJavaPkg.Files.SortedSlice() {
 					path := filepath.Join(mRel, f)
 					file := javaFile{
@@ -1050,10 +1051,28 @@ func addNonLocalImportsAndExports(toImports *sorted_set.SortedSet[types.PackageN
 	}
 }
 
+func declaredOuterClassNames(classes *sorted_set.SortedSet[types.ClassName]) *sorted_set.SortedSet[string] {
+	names := sorted_set.NewSortedSet([]string{})
+	for _, class := range classes.SortedSlice() {
+		names.Add(class.BareOuterClassName())
+	}
+	return names
+}
 func addFilteringOutOwnPackage(to *sorted_set.SortedSet[types.PackageName], toClasses *sorted_set.SortedSet[types.ClassName], from *sorted_set.SortedSet[types.ClassName], ownPackage types.PackageName, localOuterClassNames *sorted_set.SortedSet[string]) {
 	for _, fromPackage := range from.SortedSlice() {
 		if ownPackage == fromPackage.PackageName() {
 			if localOuterClassNames.Contains(fromPackage.BareOuterClassName()) {
+				continue
+			}
+		}
+		// A lowercase top-level Java class is parsed as another package segment.
+		// Filter it only when that exact first suffix segment is a class declared
+		// by this source set; unrelated subpackages must remain dependencies.
+		ownPackagePrefix := ownPackage.Name + "."
+		fullClassName := fromPackage.FullyQualifiedClassName()
+		if ownPackage.Name != "" && strings.HasPrefix(fullClassName, ownPackagePrefix) {
+			firstSuffixSegment := strings.SplitN(strings.TrimPrefix(fullClassName, ownPackagePrefix), ".", 2)[0]
+			if localOuterClassNames.Contains(firstSuffixSegment) {
 				continue
 			}
 		}

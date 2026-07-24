@@ -76,15 +76,13 @@ func ParseClassName(fullyQualified string) (*ClassName, error) {
 	}
 
 	indexOfOuterClassName := len(parts) - 1
-	for i := len(parts) - 1; i >= 0; i-- {
+	for i := 0; i < len(parts); i++ {
 		runes := []rune(parts[i])
 		if len(runes) == 0 {
-			// Anonymous inner classes end up getting parsed as having name "", so we need to do an "empty" check before looking at the first letter.
-			// This means we skip over empty class names when trying to find outer classes.
+			// Anonymous inner classes may end with an empty component.
 			continue
 		} else if unicode.IsUpper(runes[0]) {
 			indexOfOuterClassName = i
-		} else {
 			break
 		}
 	}

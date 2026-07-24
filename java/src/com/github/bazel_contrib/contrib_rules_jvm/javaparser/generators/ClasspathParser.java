@@ -1,6 +1,7 @@
 package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
 import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassName;
+import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassNameInImportPath;
 import static javax.lang.model.element.Modifier.PRIVATE;
 import static javax.lang.model.element.Modifier.PUBLIC;
 import static javax.lang.model.element.Modifier.STATIC;
@@ -249,6 +250,7 @@ public class ClasspathParser {
       // This prevents inner/nested class references from being treated as
       // same-package cross-target dependencies.
       collectLocalClassNames(t);
+      registerLocalTopLevelClassImports(t);
 
       return super.visitCompilationUnit(t, v);
     }
@@ -264,6 +266,27 @@ public class ClasspathParser {
           return super.visitClass(t, v);
         }
       }.scan(compilationUnit, null);
+    }
+
+    private void registerLocalTopLevelClassImports(CompilationUnitTree compilationUnit) {
+      String packageName =
+          compilationUnit.getPackageName() == null
+              ? null
+              : compilationUnit.getPackageName().toString();
+      for (Tree declaration : compilationUnit.getTypeDecls()) {
+        if (!(declaration instanceof ClassTree)) {
+          continue;
+        }
+        String simpleName = ((ClassTree) declaration).getSimpleName().toString();
+        if (simpleName.isEmpty()) {
+          continue;
+        }
+        String qualifiedName =
+            packageName == null || packageName.isEmpty()
+                ? simpleName
+                : packageName + "." + simpleName;
+        currentFileImports.put(simpleName, qualifiedName);
+      }
     }
 
     @Override
@@ -296,13 +319,21 @@ public class ClasspathParser {
         // that later type references resolve to the import rather than falling through
         // to the same-package catch-all in checkFullyQualifiedType.
         String lastComponent = name.substring(name.lastIndexOf('.') + 1);
+        currentFileImports.put(lastComponent, name);
         if (isLikelyClassName(lastComponent)) {
-          currentFileImports.put(lastComponent, name);
           data.usedTypes.add(name);
         }
       } else if (name.endsWith(".*")) {
         String wildcardPackage = name.substring(0, name.lastIndexOf('.'));
-        data.usedPackagesWithoutSpecificTypes.add(wildcardPackage);
+        String lastComponent =
+            wildcardPackage.substring(wildcardPackage.lastIndexOf('.') + 1);
+        if (isLikelyClassNameInImportPath(lastComponent, true)) {
+          // A non-static on-demand import may target nested types of a class,
+          // for example `import com.google.protobuf.JsonFormat.*`.
+          data.usedTypes.add(wildcardPackage);
+        } else {
+          data.usedPackagesWithoutSpecificTypes.add(wildcardPackage);
+        }
       } else {
         String[] parts = i.getQualifiedIdentifier().toString().split("\\.");
         currentFileImports.put(parts[parts.length - 1], i.getQualifiedIdentifier().toString());
@@ -424,6 +455,9 @@ public class ClasspathParser {
     }
 
     private void maybeRecordMethodReceiverType(ExpressionTree container) {
+      if (isLowercaseUnimportedOneDotReceiver(container)) {
+        return;
+      }
       String receiverTypeName = methodReceiverTypeName(container);
       if (receiverTypeName == null) {
         return;
@@ -434,6 +468,21 @@ public class ClasspathParser {
           || looksLikeClassName(receiverTypeName)) {
         checkFullyQualifiedType(container);
       }
+    }
+
+    private boolean isLowercaseUnimportedOneDotReceiver(ExpressionTree container) {
+      if (!(container instanceof MemberSelectTree)) {
+        return false;
+      }
+      ExpressionTree root = ((MemberSelectTree) container).getExpression();
+      if (root.getKind() != Tree.Kind.IDENTIFIER) {
+        return false;
+      }
+      String rootName = root.toString();
+      if (rootName.isEmpty() || currentFileImports.containsKey(rootName)) {
+        return false;
+      }
+      return Character.isLowerCase(rootName.codePointAt(0));
     }
 
     @Nullable
