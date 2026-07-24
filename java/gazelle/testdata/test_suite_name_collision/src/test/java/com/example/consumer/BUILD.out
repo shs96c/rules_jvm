@@ -1,0 +1,7 @@
+load("@contrib_rules_jvm//java:defs.bzl", "java_test_suite")
+
+java_test_suite(
+    name = "consumer",
+    srcs = ["ConsumerTest.java"],
+    deps = ["//src/test/java/com/example/CATest:CATest-tests-test-lib"],
+)

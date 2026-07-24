@@ -101,6 +101,29 @@ func ParseClassName(fullyQualified string) (*ClassName, error) {
 	}, nil
 }
 
+// ParseClassNameInPackage parses a fully-qualified class name known to live in
+// packageName or one of its sub-packages. Anchoring the known package first
+// keeps a class-cased package segment (e.g. a test directory named after its
+// test class) from being taken for the outer class; the case heuristic is only
+// applied to the remainder. Falls back to ParseClassName when fullyQualified
+// is not under packageName.
+func ParseClassNameInPackage(packageName PackageName, fullyQualified string) (*ClassName, error) {
+	prefix := packageName.Name + "."
+	if packageName.Name == "" || !strings.HasPrefix(fullyQualified, prefix) {
+		return ParseClassName(fullyQualified)
+	}
+	parsed, err := ParseClassName(fullyQualified[len(prefix):])
+	if err != nil {
+		return nil, err
+	}
+	if parsed.packageName.Name == "" {
+		parsed.packageName = packageName
+	} else {
+		parsed.packageName = NewPackageName(prefix + parsed.packageName.Name)
+	}
+	return parsed, nil
+}
+
 func ClassNameLess(l, r ClassName) bool {
 	return l.FullyQualifiedClassName() < r.FullyQualifiedClassName()
 }
