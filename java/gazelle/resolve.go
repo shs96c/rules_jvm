@@ -47,6 +47,15 @@ type packageClassIndex struct {
 	test map[string][]label.Label
 }
 
+func appendLabelOnce(labels []label.Label, candidate label.Label) []label.Label {
+	for _, existing := range labels {
+		if existing == candidate {
+			return labels
+		}
+	}
+	return append(labels, candidate)
+}
+
 func NewResolver(lang *javaLang) *Resolver {
 	internalCache, err := lru.New(10000)
 	if err != nil {
@@ -229,6 +238,23 @@ func ruleIsTestOnly(r *rule.Rule) bool {
 	return false
 }
 
+// resolveMavenWholePackageClass is the last class-level fallback after exact
+// Maven ownership and workspace/CrossResolver ownership have both missed.
+// It lets compact whole-package Maven index entries participate without
+// overriding a class that the current workspace defines.
+func (jr *Resolver) resolveMavenWholePackageClass(pc *javaconfig.Config, className types.ClassName) (label.Label, error) {
+	l, err := jr.lang.mavenResolver.Resolve(className.PackageName(), pc.ExcludedArtifacts(), pc.MavenRepositoryName())
+	if err == nil {
+		return l, nil
+	}
+	var noExternal *maven.NoExternalImportsError
+	var multipleExternal *maven.MultipleExternalImportsError
+	if errors.As(err, &noExternal) || errors.As(err, &multipleExternal) {
+		return label.NoLabel, nil
+	}
+	return label.NoLabel, err
+}
+
 func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rule.Rule, attrName string, requiredPackageNames *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], ix *resolve.RuleIndex, isTestRule bool, from label.Label, ownPackageNames *sorted_set.SortedSet[types.PackageName]) {
 	labels := sorted_set.NewSortedSetFn[label.Label]([]label.Label{}, sorted_set.LabelLess)
 
@@ -288,10 +314,18 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 				l, err := jr.lang.mavenResolver.ResolveClass(className, pc.ExcludedArtifacts(), pc.MavenRepositoryName())
 				if err != nil {
 					jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
-					continue
+					// A split Maven package may be ambiguous even when a workspace or
+					// generated-code resolver has an exact owner for this class.
+					l = label.NoLabel
 				}
 				if l == label.NoLabel {
 					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule)
+				}
+				if l == label.NoLabel {
+					l, err = jr.resolveMavenWholePackageClass(pc, className)
+					if err != nil {
+						jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+					}
 				}
 				if l != label.NoLabel {
 					labels.Add(simplifyLabel(c.RepoName, l, from))
@@ -361,13 +395,21 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 				l, err := jr.lang.mavenResolver.ResolveClass(className, pc.ExcludedArtifacts(), pc.MavenRepositoryName())
 				if err != nil {
 					jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
-					continue
+					// Do not let Maven ambiguity mask an exact workspace or
+					// generated-code provider registered through CrossResolve.
+					l = label.NoLabel
 				}
 				if l == label.NoLabel {
 					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule)
 				}
 				if l == label.NoLabel && isTestRule {
 					l = jr.resolveTestSuiteHelperClass(c, imp, className, ix, from)
+				}
+				if l == label.NoLabel {
+					l, err = jr.resolveMavenWholePackageClass(pc, className)
+					if err != nil {
+						jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+					}
 				}
 				if l != label.NoLabel {
 					labels.Add(simplifyLabel(c.RepoName, l, from))
@@ -594,6 +636,13 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 		return label.NoLabel, false
 	}
 
+	// No package-level provider exists, but generated-code extensions commonly
+	// expose only exact classes through CrossResolve. Signal the caller to take
+	// its class-level path before treating the import as unresolved.
+	if len(pkgClasses) > 0 {
+		return label.NoLabel, true
+	}
+
 	jr.lang.logger.Error().
 		Str("package", imp.Name).
 		Str("from rule", from.String()).
@@ -645,9 +694,9 @@ func (jr *Resolver) buildPackageClassIndex(c *config.Config, pkg types.PackageNa
 			}
 			name := cls.BareOuterClassName()
 			if info.testonly {
-				pci.test[name] = append(pci.test[name], m.Label)
+				pci.test[name] = appendLabelOnce(pci.test[name], m.Label)
 			} else {
-				pci.prod[name] = append(pci.prod[name], m.Label)
+				pci.prod[name] = appendLabelOnce(pci.prod[name], m.Label)
 			}
 		}
 	}
