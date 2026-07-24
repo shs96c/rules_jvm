@@ -10,8 +10,8 @@ import (
 )
 
 // populateProductionAssociatesAttr preserves Kotlin's module-wide `internal` across the
-// fine-grained per-package targets that scc granularity produces. Under that granularity a
-// module's libraries all share one Bazel package, so:
+// fine-grained targets that scc granularity produces. An explicit kotlin module name can
+// extend the same logical module across nested Bazel package ownership boundaries, so:
 //
 //   - a non-leaf (one with same-package kt_jvm_library deps) friends those deps via
 //     `associates`, moving them out of `deps`, and adopts their shared module_name -- so it
@@ -21,11 +21,13 @@ import (
 //     on one Kotlin module.
 //
 // rules_kotlin requires all of a target's associates to share one module_name and analyses
-// deps bottom-up, so the leaves' shared module_name propagates to every target. Only scc
-// granularity (many packages, one module) is touched; package granularity is unchanged.
+// deps bottom-up, so the leaves' shared module_name propagates to every target. Without an
+// explicit module name only scc granularity is touched; the directive deliberately opts
+// package/module-granularity descendants into the named logical module.
 func (jr *Resolver) populateProductionAssociatesAttr(c *config.Config, r *rule.Rule, from label.Label) {
-	pc := c.Exts[languageName].(javaconfig.Configs)[from.Pkg]
-	if pc == nil || pc.ModuleGranularity() != "scc" {
+	configs := c.Exts[languageName].(javaconfig.Configs)
+	pc := configs[from.Pkg]
+	if pc == nil || (pc.ModuleGranularity() != "scc" && pc.KotlinModuleName() == "") {
 		return
 	}
 
@@ -37,7 +39,9 @@ func (jr *Resolver) populateProductionAssociatesAttr(c *config.Config, r *rule.R
 			continue
 		}
 		abs := parsed.Abs(from.Repo, from.Pkg)
-		if abs.Repo == from.Repo && abs.Pkg == from.Pkg && jr.lang.kotlinLibraries[label.New("", abs.Pkg, abs.Name).String()] {
+		if abs.Repo == from.Repo &&
+			jr.lang.kotlinLibraries[label.New("", abs.Pkg, abs.Name).String()] &&
+			productionKotlinModulesMatch(pc, configs[abs.Pkg], from.Pkg, abs.Pkg) {
 			associates = append(associates, dep)
 		} else {
 			kept = append(kept, dep)
@@ -52,7 +56,34 @@ func (jr *Resolver) populateProductionAssociatesAttr(c *config.Config, r *rule.R
 		return
 	}
 
-	// Leaf: pin the shared module name (the package path) and clear any stale associates.
-	r.SetAttr("module_name", strings.ReplaceAll(from.Pkg, "/", "_"))
+	// Leaf: pin the shared module name and clear any stale associates.
+	moduleName := pc.KotlinModuleName()
+	if moduleName == "" {
+		moduleName = strings.ReplaceAll(from.Pkg, "/", "_")
+	}
+	r.SetAttr("module_name", moduleName)
 	r.DelAttr("associates")
+}
+
+func productionKotlinModulesMatch(fromConfig, dependencyConfig *javaconfig.Config, fromPkg, dependencyPkg string) bool {
+	if fromConfig.KotlinModuleName() != "" {
+		return dependencyConfig != nil && dependencyConfig.KotlinModuleName() == fromConfig.KotlinModuleName()
+	}
+	return fromConfig.ModuleGranularity() == "scc" && fromPkg == dependencyPkg
+}
+
+// kotlinModuleIdentity is deliberately conservative when no explicit logical
+// module has been configured. SCC targets in one Bazel package share the module
+// name populated above. Other generated Kotlin libraries use rules_kotlin's
+// label-derived default and are therefore distinct modules.
+func kotlinModuleIdentity(configs javaconfig.Configs, target label.Label) string {
+	if pc := configs[target.Pkg]; pc != nil {
+		if name := pc.KotlinModuleName(); name != "" {
+			return "configured:" + name
+		}
+		if pc.ModuleGranularity() == "scc" {
+			return "scc:" + target.Pkg
+		}
+	}
+	return "target:" + target.String()
 }
