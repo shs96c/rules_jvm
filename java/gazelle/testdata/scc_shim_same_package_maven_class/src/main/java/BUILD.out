@@ -1,0 +1,12 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
+# gazelle:java_module_granularity scc
+# gazelle:jvm_kotlin_enabled false
+
+java_library(
+    name = "avro",
+    srcs = ["org/apache/avro/SchemaCompatibility.java"],
+    visibility = ["//:__subpackages__"],
+    exports = ["@maven//:org_apache_avro_avro"],
+    deps = ["@maven//:org_apache_avro_avro"],
+)
