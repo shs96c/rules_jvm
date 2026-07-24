@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/maven"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
@@ -458,6 +459,25 @@ func (r *TestMavenResolver) Resolve(pkg types.PackageName, excludedArtifacts map
 
 func (r *TestMavenResolver) ResolveClass(className types.ClassName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
 	return label.NoLabel, nil
+}
+
+func TestResolveMavenWholePackageClass(t *testing.T) {
+	lang := &javaLang{mavenResolver: NewTestMavenResolver()}
+	resolver := NewResolver(lang)
+	config := javaconfig.New(".")
+	className, err := types.ParseClassName("com.google.common.primitives.Ints")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolver.resolveMavenWholePackageClass(config, *className)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := label.New("maven", "", "com_google_guava_guava")
+	if got != want {
+		t.Fatalf("resolveMavenWholePackageClass() = %s, want %s", got, want)
+	}
 }
 
 func TestProtoSplitPackageClassResolution(t *testing.T) {
