@@ -676,6 +676,13 @@ func (jr *Resolver) buildPackageClassIndex(c *config.Config, pkg types.PackageNa
 	testMatches := ix.FindRulesByImportWithConfig(c, testImportSpec, languageName)
 	matches = append(matches, testMatches...)
 
+	// java_test_suite registers helper-bearing packages under a distinct suite
+	// import key, while its declared helper classes are cached under the
+	// synthetic "<suite>-test-lib" target emitted by the macro.
+	testsuiteCacheKey := types.NewResolvableJavaPackage(pkg, true, true)
+	testsuiteImportSpec := resolve.ImportSpec{Lang: languageName, Imp: testsuiteCacheKey.String()}
+	testsuiteMatches := ix.FindRulesByImportWithConfig(c, testsuiteImportSpec, languageName)
+
 	pci := &packageClassIndex{
 		prod: make(map[string][]label.Label),
 		test: make(map[string][]label.Label),
@@ -698,6 +705,23 @@ func (jr *Resolver) buildPackageClassIndex(c *config.Config, pkg types.PackageNa
 			} else {
 				pci.prod[name] = appendLabelOnce(pci.prod[name], m.Label)
 			}
+		}
+	}
+
+	for _, m := range testsuiteMatches {
+		helperLabel := m.Label
+		helperLabel.Name = testHelperLibname(helperLabel.Name)
+		cacheLabel := label.New("", helperLabel.Pkg, helperLabel.Name)
+		info, ok := jr.lang.classExportCache[cacheLabel.String()]
+		if !ok {
+			continue
+		}
+		for _, cls := range info.classes {
+			if cls.PackageName() != pkg {
+				continue
+			}
+			name := cls.BareOuterClassName()
+			pci.test[name] = appendLabelOnce(pci.test[name], helperLabel)
 		}
 	}
 
@@ -789,7 +813,7 @@ func (jr *Resolver) ruleDeclaresClass(lbl label.Label, className types.ClassName
 	return false
 }
 
-// resolveTestSuiteHelperClass returns the "<suite>-test-lib" helper library of the lone
+// resolveTestSuiteHelperClass returns the unique "<suite>-test-lib" helper library of a
 // java_test_suite that provides imp AND declares className, or NoLabel otherwise.
 // java_test_suite moves its non-test sources into a helper library named <suite>-test-lib;
 // a test in another package that imports one of those helpers must depend on it. This mirrors
@@ -802,18 +826,25 @@ func (jr *Resolver) ruleDeclaresClass(lbl label.Label, className types.ClassName
 func (jr *Resolver) resolveTestSuiteHelperClass(c *config.Config, imp types.PackageName, className types.ClassName, ix *resolve.RuleIndex, from label.Label) label.Label {
 	spec := resolve.ImportSpec{Lang: languageName, Imp: types.NewResolvableJavaPackage(imp, true, true).String()}
 	matches := ix.FindRulesByImportWithConfig(c, spec, languageName)
-	if len(matches) != 1 {
+	helper := label.NoLabel
+	for _, match := range matches {
+		candidate := match.Label
+		if candidate == from {
+			continue
+		}
+		candidate.Name += "-test-lib"
+		if !jr.ruleDeclaresClass(candidate, className) {
+			continue
+		}
+		if helper != label.NoLabel {
+			return label.NoLabel
+		}
+		helper = candidate
+	}
+	if helper == label.NoLabel {
 		return label.NoLabel
 	}
-	l := matches[0].Label
-	if l == from {
-		return label.NoLabel
-	}
-	l.Name += "-test-lib"
-	if !jr.ruleDeclaresClass(l, className) {
-		return label.NoLabel
-	}
-	return simplifyLabel(c.RepoName, l, from)
+	return simplifyLabel(c.RepoName, helper, from)
 }
 
 // resolveClassFromCrossResolver consults registered Gazelle CrossResolvers for a

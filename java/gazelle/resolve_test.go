@@ -589,6 +589,50 @@ java_library(
 	}
 }
 
+func TestPackageClassIndexUsesTestSuiteHelperLibrary(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+
+	const pkg = "tests/helpers"
+	const suiteName = "helpers-tests"
+	javaPackage := types.NewPackageName("com.example.testing")
+	buildPath := filepath.Join(filepath.FromSlash(pkg), "BUILD.bazel")
+	file, err := rule.LoadData(buildPath, pkg, []byte(`java_test_suite(name = "helpers-tests")`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	suiteRule := file.Rules[0]
+	suiteRule.SetPrivateAttr(packagesKey, []types.ResolvableJavaPackage{
+		*types.NewResolvableJavaPackage(javaPackage, true, true),
+	})
+
+	var javaLangInstance *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			javaLangInstance = jl
+			break
+		}
+	}
+	if javaLangInstance == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+
+	helperLabel := label.New("", pkg, testHelperLibname(suiteName))
+	javaLangInstance.classExportCache[helperLabel.String()] = classExportInfo{
+		classes:  []types.ClassName{types.NewClassName(javaPackage, "TestHelper")},
+		testonly: true,
+	}
+	ix.AddRule(c, suiteRule, file)
+	ix.Finish()
+
+	pci := NewResolver(javaLangInstance).buildPackageClassIndex(c, javaPackage, ix)
+	providers := pci.test["TestHelper"]
+	if len(providers) != 1 || providers[0] != helperLabel {
+		t.Fatalf("TestHelper providers = %v, want [%s]", providers, helperLabel)
+	}
+}
+
 // fakeClassCrossResolver is a stand-in for an external gazelle plugin (e.g. a
 // proto/wire generator) that contributes class-level java resolutions via the
 // resolve.CrossResolver interface.
