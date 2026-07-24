@@ -1,11 +1,12 @@
 package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
+import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-class ParsedPackageData {
+public class ParsedPackageData {
   /** Packages defined. */
   final Set<String> packages = new TreeSet<>();
 
@@ -41,6 +42,30 @@ class ParsedPackageData {
   final Map<String, PerClassData> perClassData = new TreeMap<>();
 
   ParsedPackageData() {}
+
+  public Set<String> packages() {
+    return Collections.unmodifiableSet(packages);
+  }
+
+  public Set<String> usedTypes() {
+    return Collections.unmodifiableSet(usedTypes);
+  }
+
+  public Set<String> usedPackagesWithoutSpecificTypes() {
+    return Collections.unmodifiableSet(usedPackagesWithoutSpecificTypes);
+  }
+
+  public Set<String> exportedTypes() {
+    return Collections.unmodifiableSet(exportedTypes);
+  }
+
+  public Set<String> mainClasses() {
+    return Collections.unmodifiableSet(mainClasses);
+  }
+
+  public Set<String> classNames() {
+    return Collections.unmodifiableSet(perClassData.keySet());
+  }
 
   void merge(ParsedPackageData other) {
     packages.addAll(other.packages);
