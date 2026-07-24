@@ -149,10 +149,39 @@ func (jr *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 
 	jr.populateAttr(c, packageConfig, r, "deps", resolveInput.ImportedPackageNames, resolveInput.ImportedClasses, ix, isTestRule, from, resolveInput.PackageNames)
 	jr.populateAttr(c, packageConfig, r, "exports", resolveInput.ExportedPackageNames, resolveInput.ExportedClassNames, ix, isTestRule, from, resolveInput.PackageNames)
+	if isKotlinLibrary(r.Kind()) {
+		ensureKotlinExportsAreCompileDeps(c, r, from)
+	}
 
 	jr.populateAssociatesAttr(c, ix, resolveInput, r, isTestRule, from)
 
 	jr.populatePluginsAttr(c, ix, resolveInput, packageConfig, from, isTestRule, r)
+}
+
+// ensureKotlinExportsAreCompileDeps puts every exported library on this target's own
+// compile classpath. rules_kotlin propagates exports to consumers but deliberately builds
+// a kt_jvm_library's compile classpath from deps and associates only.
+//
+// This runs before associates normalization so a same-module Kotlin dependency may still
+// move from deps to associates, which supplies the same compile edge without listing the
+// target in both attributes.
+func ensureKotlinExportsAreCompileDeps(c *config.Config, r *rule.Rule, from label.Label) {
+	if len(r.AttrStrings("exports")) == 0 {
+		return
+	}
+
+	compileDeps := sorted_set.NewSortedSetFn([]label.Label{}, sorted_set.LabelLess)
+	for _, attrName := range []string{"deps", "exports"} {
+		for _, raw := range r.AttrStrings(attrName) {
+			parsed, err := label.Parse(raw)
+			if err != nil {
+				panic(fmt.Sprintf("error converting Kotlin %s %q to label: %v", attrName, raw, err))
+			}
+			normalized := normalizeLabelPreference(parsed, c.RepoName, from)
+			compileDeps.Add(simplifyLabel(c.RepoName, normalized, from))
+		}
+	}
+	setManagedLabelAttr(r, "deps", compileDeps)
 }
 
 // populateAssociatesAttr makes a Kotlin test target a friend (associate) of the production
