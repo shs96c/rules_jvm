@@ -3,6 +3,9 @@ package gazelle
 import (
 	"testing"
 
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_multiset"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -193,6 +196,44 @@ func TestSingleJavaTestFile(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAnnotationProcessorExtraImportsAddsProductionImports(t *testing.T) {
+	annotation := types.NewClassName(types.NewPackageName("com.example.annotations"), "GenerateHelpers")
+	extraImport := types.NewClassName(types.NewPackageName("com.example.generated"), "GeneratedHelper")
+	cfg := javaconfig.New(".")
+	cfg.AddAnnotationProcessorExtraImport(annotation, extraImport)
+
+	javaPkg := &java.Package{
+		Name: types.NewPackageName("com.example"),
+		PerClassMetadata: map[string]java.PerClassMetadata{
+			"Example": {
+				AnnotationClassNames:       sorted_set.NewSortedSetFn([]types.ClassName{annotation}, types.ClassNameLess),
+				MethodAnnotationClassNames: sorted_multiset.NewSortedMultiSetFn[string, types.ClassName](types.ClassNameLess),
+				FieldAnnotationClassNames:  sorted_multiset.NewSortedMultiSetFn[string, types.ClassName](types.ClassNameLess),
+			},
+		},
+	}
+	annotationProcessorClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	productionJavaImports := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	productionJavaImportedClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	testJavaImports := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	testJavaImportedClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+
+	addAnnotationProcessorClassesAndExtraImports(
+		cfg,
+		javaPkg,
+		annotationProcessorClasses,
+		productionJavaImports,
+		productionJavaImportedClasses,
+		testJavaImports,
+		testJavaImportedClasses,
+	)
+
+	require.Equal(t, []types.PackageName{extraImport.PackageName()}, productionJavaImports.SortedSlice())
+	require.Equal(t, []types.ClassName{extraImport}, productionJavaImportedClasses.SortedSlice())
+	require.Empty(t, testJavaImports.SortedSlice())
+	require.Empty(t, testJavaImportedClasses.SortedSlice())
 }
 
 func TestSuite(t *testing.T) {
