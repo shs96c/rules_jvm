@@ -5,6 +5,7 @@ import (
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java_export_index"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_multiset"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
@@ -377,6 +378,101 @@ func TestAddNonLocalImports(t *testing.T) {
 	}
 }
 
+func TestGenerateJavaLibraryPreservesUnqualifiedUndeclaredSamePackageClass(t *testing.T) {
+	sharedPackage := types.NewPackageName("com.example.shared")
+	consumer := types.NewClassName(sharedPackage, "Consumer")
+	localSibling := types.NewClassName(sharedPackage, "LocalSibling")
+	provider := types.NewClassName(sharedPackage, "Provider")
+
+	// Model parser output for Consumer referring to a local sibling and to an
+	// unqualified Provider supplied by another workspace target in the same package.
+	importedClasses := sorted_set.NewSortedSetFn([]types.ClassName{
+		localSibling,
+		provider,
+	}, types.ClassNameLess)
+	declaredClasses := sorted_set.NewSortedSetFn([]types.ClassName{
+		consumer,
+		localSibling,
+	}, types.ClassNameLess)
+	modulePackages := stringsToPackageNames([]string{"com.example.shared"})
+
+	importedPackages, importedClasses := filterImportsInModule(
+		stringsToPackageNames([]string{"com.example.shared"}),
+		importedClasses,
+		modulePackages,
+		declaredClasses,
+	)
+
+	var res language.GenerateResult
+	l := newTestJavaLang(t)
+	l.generateJavaLibrary(generateJavaLibraryArgs{
+		File:                    nil,
+		Rel:                     "consumer",
+		LibraryKind:             "java_library",
+		Result:                  &res,
+		Config:                  javaconfig.New("."),
+		Name:                    "consumer",
+		Srcs:                    []string{"consumer/Consumer.java", "consumer/LocalSibling.java"},
+		Packages:                modulePackages,
+		Imports:                 importedPackages,
+		ImportedClasses:         importedClasses,
+		Exports:                 stringsToPackageNames(nil),
+		ExportedClasses:         nil,
+		ExternalExportedClasses: nil,
+		AnnotationProcessors:    nil,
+		TestOnly:                false,
+	})
+
+	require.Len(t, res.Imports, 1)
+	resolveInput := res.Imports[0].(types.ResolveInput)
+	require.Empty(t, resolveInput.ImportedPackageNames.SortedSlice())
+	require.Equal(
+		t, []types.ClassName{provider}, resolveInput.ImportedClasses.SortedSlice(),
+	)
+}
+
+func TestFilterNamespaceClassesInModule(t *testing.T) {
+	modulePackages := stringsToPackageNames([]string{
+		"com.example.mod.PaymentMethods",
+		"com.example.mod.PaymentMethods.AvailableFilters",
+	})
+	declaredClasses := sorted_set.NewSortedSetFn([]types.ClassName{
+		types.NewClassName(types.NewPackageName("com.example.mod.PaymentMethods.AvailableFilters"), "QueryEngine"),
+		types.NewClassName(types.NewPackageName("com.example.mod.PaymentMethods"), "TypeAliasDefinitionsKt"),
+	}, types.ClassNameLess)
+	packages := stringsToPackageNames([]string{
+		"com.example.mod",
+		"com.external",
+	})
+	classes := sorted_set.NewSortedSetFn[types.ClassName]([]types.ClassName{}, types.ClassNameLess)
+	for _, value := range []string{
+		"com.example.mod.PaymentMethods",
+		"com.example.mod.PaymentMethods.AvailableFilters.QueryEngine",
+		"com.example.mod.PaymentMethods.TypeAliasDefinitionsKt.Companion",
+		"com.example.mod.PaymentMethods.ExternalSplit",
+		"com.external.Widget",
+	} {
+		class, err := types.ParseClassName(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		classes.Add(*class)
+	}
+
+	gotPackages, gotClasses :=
+		filterNamespaceClassesInModule(packages, classes, modulePackages, declaredClasses)
+	require.Equal(t, []types.PackageName{{Name: "com.external"}}, gotPackages.SortedSlice())
+
+	var gotClassNames []string
+	for _, class := range gotClasses.SortedSlice() {
+		gotClassNames = append(gotClassNames, class.FullyQualifiedClassName())
+	}
+	require.Equal(t, []string{
+		"com.example.mod.PaymentMethods.ExternalSplit",
+		"com.external.Widget",
+	}, gotClassNames)
+}
+
 func TestIsOwnedByModuleRoot(t *testing.T) {
 	root := javaconfig.New(".")
 	require.NoError(t, root.SetModuleGranularity("module"))
@@ -428,7 +524,8 @@ func TestIsOwnedByModuleRoot(t *testing.T) {
 func newTestJavaLang(t *testing.T) javaLang {
 	t.Helper()
 	return javaLang{
-		logger: zerolog.New(zerolog.NewTestWriter(t)),
+		logger:          zerolog.New(zerolog.NewTestWriter(t)),
+		javaExportIndex: java_export_index.NewJavaExportIndex(languageName, zerolog.New(zerolog.NewTestWriter(t))),
 	}
 }
 

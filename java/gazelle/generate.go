@@ -255,6 +255,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 
 	// All java packages present in this bazel package.
 	allPackageNames := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	allDeclaredClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 
 	annotationProcessorClasses := sorted_set.NewSortedSetFn(nil, types.ClassNameLess)
 
@@ -264,6 +265,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				continue
 			}
 			allPackageNames.Add(mJavaPkg.Name)
+			allDeclaredClasses.AddAll(mJavaPkg.DeclaredClasses)
 			mLocalOuterClassNames := declaredOuterClassNames(mJavaPkg.DeclaredClasses)
 
 			if !mJavaPkg.TestPackage {
@@ -303,6 +305,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		}
 	} else {
 		allPackageNames.Add(javaPkg.Name)
+		allDeclaredClasses.AddAll(javaPkg.DeclaredClasses)
 		if javaPkg.TestPackage {
 			// Tests don't get to export things, as things shouldn't depend on them.
 			addNonLocalImportsAndExports(testJavaImports, testJavaImportedClasses, nil, nil, javaPkg.ImportedClasses, javaPkg.ImportedPackagesWithoutSpecificClasses, javaPkg.ExportedClasses, javaPkg.Name, likelyLocalClassNames)
@@ -342,12 +345,16 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		)
 	}
 
-	nonLocalProductionJavaImports := productionJavaImports.Filter(func(p types.PackageName) bool {
-		return !allPackageNames.Contains(p)
-	})
-	nonLocalProductionJavaImportedClasses := productionJavaImportedClasses.Filter(func(c types.ClassName) bool {
-		return !allPackageNames.Contains(c.PackageName())
-	})
+	nonLocalProductionJavaImports, nonLocalProductionJavaImportedClasses :=
+		filterImportsInModule(productionJavaImports, productionJavaImportedClasses, allPackageNames, allDeclaredClasses)
+	// Exports from sub-packages can name classes in *other* packages of the same
+	// module (e.g. a Kotlin extension function on a class from a sibling package).
+	// Those are added to nonLocalJavaExports / nonLocalJavaExternalExportedClasses by
+	// `addFilteringOutOwnPackage`, which only knows the per-file ownPackage, not the
+	// module-wide set. Strip them here so the module's own packages don't leak into
+	// `exports` at resolve time -- mirroring the imports filter above.
+	nonLocalJavaExports, nonLocalJavaExternalExportedClasses =
+		filterNamespaceClassesInModule(nonLocalJavaExports, nonLocalJavaExternalExportedClasses, allPackageNames, allDeclaredClasses)
 	nonLocalJavaExports = nonLocalJavaExports.Filter(func(p types.PackageName) bool {
 		return !allPackageNames.Contains(p)
 	})
@@ -1051,6 +1058,55 @@ func addNonLocalImportsAndExports(toImports *sorted_set.SortedSet[types.PackageN
 	}
 }
 
+// filterImportsInModule drops package-level imports satisfied by the same
+// module, but preserves class-level imports unless the module declares them.
+// The resolver needs those remaining classes to find a different workspace
+// target that supplies an undeclared class in a split package.
+func filterImportsInModule(packages *sorted_set.SortedSet[types.PackageName], classes *sorted_set.SortedSet[types.ClassName], modulePackages *sorted_set.SortedSet[types.PackageName], declaredClasses *sorted_set.SortedSet[types.ClassName]) (*sorted_set.SortedSet[types.PackageName], *sorted_set.SortedSet[types.ClassName]) {
+	packages, classes =
+		filterNamespaceClassesInModule(packages, classes, modulePackages, declaredClasses)
+	return packages.Filter(func(p types.PackageName) bool {
+		return !modulePackages.Contains(p)
+	}), classes
+}
+// filterNamespaceClassesInModule removes parser-produced classes that are
+// actually owned package namespaces or locally declared classes. Declaration
+// matching keeps undeclared external split-package classes visible.
+func filterNamespaceClassesInModule(packages *sorted_set.SortedSet[types.PackageName], classes *sorted_set.SortedSet[types.ClassName], modulePackages *sorted_set.SortedSet[types.PackageName], declaredClasses *sorted_set.SortedSet[types.ClassName]) (*sorted_set.SortedSet[types.PackageName], *sorted_set.SortedSet[types.ClassName]) {
+	ownedPackageNames := make(map[string]struct{}, modulePackages.Len())
+	for _, modulePackage := range modulePackages.SortedSlice() {
+		ownedPackageNames[modulePackage.Name] = struct{}{}
+	}
+	declaredClassNames := make(map[string]struct{}, declaredClasses.Len())
+	for _, declaredClass := range declaredClasses.SortedSlice() {
+		declaredClassNames[declaredClass.FullyQualifiedClassName()] = struct{}{}
+	}
+	falseClassPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	filteredClasses := classes.Filter(func(class types.ClassName) bool {
+		className := class.FullyQualifiedClassName()
+		_, owned := ownedPackageNames[className]
+		for candidate := className; !owned && candidate != ""; {
+			if _, declared := declaredClassNames[candidate]; declared {
+				owned = true
+				break
+			}
+			lastDot := strings.LastIndexByte(candidate, '.')
+			if lastDot < 0 {
+				break
+			}
+			candidate = candidate[:lastDot]
+		}
+		if owned {
+			falseClassPackages.Add(class.PackageName())
+		}
+		return !owned
+	})
+	filteredPackages := packages.Filter(func(pkg types.PackageName) bool {
+		return !falseClassPackages.Contains(pkg)
+	})
+	return filteredPackages, filteredClasses
+}
+
 func declaredOuterClassNames(classes *sorted_set.SortedSet[types.ClassName]) *sorted_set.SortedSet[string] {
 	names := sorted_set.NewSortedSet([]string{})
 	for _, class := range classes.SortedSlice() {
@@ -1058,6 +1114,7 @@ func declaredOuterClassNames(classes *sorted_set.SortedSet[types.ClassName]) *so
 	}
 	return names
 }
+
 func addFilteringOutOwnPackage(to *sorted_set.SortedSet[types.PackageName], toClasses *sorted_set.SortedSet[types.ClassName], from *sorted_set.SortedSet[types.ClassName], ownPackage types.PackageName, localOuterClassNames *sorted_set.SortedSet[string]) {
 	for _, fromPackage := range from.SortedSlice() {
 		if ownPackage == fromPackage.PackageName() {
@@ -1087,7 +1144,6 @@ func addFilteringOutOwnPackage(to *sorted_set.SortedSet[types.PackageName], toCl
 		}
 	}
 }
-
 func accumulateJavaFile(cfg *javaconfig.Config, testJavaFiles, testHelperJavaFiles *sorted_set.SortedSet[javaFile], separateTestJavaFiles map[javaFile]separateJavaTestReasons, file javaFile, perClassMetadata map[string]java.PerClassMetadata, log zerolog.Logger) {
 	if cfg.IsJavaTestFile(filepath.Base(file.pathRelativeToBazelWorkspaceRoot)) {
 		annotationClassNames := sorted_set.NewSortedSetFn[types.ClassName](nil, types.ClassNameLess)
