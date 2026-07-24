@@ -760,34 +760,24 @@ func generateProtoLibraries(l *javaLang, args language.GenerateArgs, log zerolog
 		rjl.SetPrivateAttr(packagesKey, []types.ResolvableJavaPackage{*types.NewResolvableJavaPackage(packageName, false, false)})
 
 		// Extract class names from proto files for class-level resolution.
-		// Proto compilation generates Java classes for each message, enum, service,
-		// and an outer class (named after the proto file or via java_outer_classname option).
-		var protoClasses []types.ClassName
+		// Proto compilation always generates an outer class and gRPC service stubs.
+		// With java_multiple_files it also generates top-level messages, enums, and
+		// an OrBuilder interface for each top-level message.
+		protoClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 		for _, fileInfo := range protoPackage.Files {
-			// Add the outer class name (container for all types in the proto file)
-			outerClassName := protoOuterClassName(fileInfo)
-			if outerClassName != "" {
-				protoClasses = append(protoClasses, types.NewClassName(packageName, outerClassName))
-			}
-			for _, msg := range fileInfo.Messages {
-				protoClasses = append(protoClasses, types.NewClassName(packageName, msg))
-			}
-			for _, enum := range fileInfo.Enums {
-				protoClasses = append(protoClasses, types.NewClassName(packageName, enum))
-			}
-			for _, svc := range fileInfo.Services {
-				protoClasses = append(protoClasses, types.NewClassName(packageName, svc))
-			}
+			layout := inspectProtoJavaLayout(fileInfo)
+			protoClasses.AddAll(generatedProtoClasses(fileInfo, layout, packageName))
 		}
-		if len(protoClasses) > 0 {
-			rjl.SetPrivateAttr(classesKey, protoClasses)
+		if protoClasses.Len() > 0 {
+			classes := protoClasses.SortedSlice()
+			rjl.SetPrivateAttr(classesKey, classes)
 			ruleLabel := label.New("", args.Rel, jlName)
 			l.classExportCache[ruleLabel.String()] = classExportInfo{
-				classes:  protoClasses,
+				classes:  classes,
 				testonly: false,
 			}
-			classNames := make([]string, 0, len(protoClasses))
-			for _, c := range protoClasses {
+			classNames := make([]string, 0, len(classes))
+			for _, c := range classes {
 				classNames = append(classNames, c.BareOuterClassName())
 			}
 			log.Debug().
@@ -802,6 +792,162 @@ func generateProtoLibraries(l *javaLang, args language.GenerateArgs, log zerolog
 			PackageNames: sorted_set.NewSortedSetFn([]types.PackageName{packageName}, types.PackageNameLess),
 		})
 	}
+}
+
+type protoJavaLayout struct {
+	multipleFiles     bool
+	genericServices   bool
+	topLevelMessages  []string
+	topLevelEnums     []string
+}
+
+func generatedProtoClasses(
+	fileInfo proto.FileInfo,
+	layout protoJavaLayout,
+	packageName types.PackageName,
+) *sorted_set.SortedSet[types.ClassName] {
+	classes := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	outerClassName := protoOuterClassName(fileInfo)
+	if outerClassName != "" {
+		classes.Add(types.NewClassName(packageName, outerClassName))
+	}
+	for _, service := range fileInfo.Services {
+		classes.Add(types.NewClassName(packageName, service+"Grpc"))
+		if !layout.genericServices {
+			continue
+		}
+		if layout.multipleFiles {
+			classes.Add(types.NewClassName(packageName, service))
+			continue
+		}
+		if outerClassName == "" {
+			continue
+		}
+		nestedServiceName := outerClassName + "." + service
+		if packageName.Name != "" {
+			nestedServiceName = packageName.Name + "." + nestedServiceName
+		}
+		nestedService, err := types.ParseClassName(nestedServiceName)
+		if err == nil {
+			classes.Add(*nestedService)
+		}
+	}
+	if !layout.multipleFiles {
+		return classes
+	}
+	for _, message := range layout.topLevelMessages {
+		classes.Add(types.NewClassName(packageName, message))
+		classes.Add(types.NewClassName(packageName, message+"OrBuilder"))
+	}
+	for _, enum := range layout.topLevelEnums {
+		classes.Add(types.NewClassName(packageName, enum))
+	}
+	return classes
+}
+
+func inspectProtoJavaLayout(fileInfo proto.FileInfo) protoJavaLayout {
+	content, err := os.ReadFile(fileInfo.Path)
+	if err != nil {
+		return protoJavaLayout{}
+	}
+	return parseProtoJavaLayout(content)
+}
+
+func parseProtoJavaLayout(content []byte) protoJavaLayout {
+	tokens := tokenizeProto(content)
+	layout := protoJavaLayout{}
+	depth := 0
+	for i, token := range tokens {
+		switch token {
+		case "{":
+			depth++
+		case "}":
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth != 0 {
+				continue
+			}
+			if token == "option" && i+4 < len(tokens) &&
+				tokens[i+2] == "=" && tokens[i+4] == ";" {
+				enabled := tokens[i+3] == "true"
+				switch tokens[i+1] {
+				case "java_multiple_files":
+					layout.multipleFiles = enabled
+				case "java_generic_services":
+					layout.genericServices = enabled
+				}
+				continue
+			}
+			if i+1 >= len(tokens) {
+				continue
+			}
+			switch token {
+			case "message":
+				layout.topLevelMessages = append(layout.topLevelMessages, tokens[i+1])
+			case "enum":
+				layout.topLevelEnums = append(layout.topLevelEnums, tokens[i+1])
+			}
+		}
+	}
+	return layout
+}
+
+func tokenizeProto(content []byte) []string {
+	var tokens []string
+	for i := 0; i < len(content); {
+		switch {
+		case content[i] == '/' && i+1 < len(content) && content[i+1] == '/':
+			i += 2
+			for i < len(content) && content[i] != '\n' {
+				i++
+			}
+		case content[i] == '/' && i+1 < len(content) && content[i+1] == '*':
+			i += 2
+			for i+1 < len(content) && !(content[i] == '*' && content[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(content) {
+				i += 2
+			}
+		case content[i] == '"' || content[i] == '\'':
+			quote := content[i]
+			i++
+			for i < len(content) {
+				if content[i] == '\\' {
+					i += 2
+					continue
+				}
+				if content[i] == quote {
+					i++
+					break
+				}
+				i++
+			}
+		case isProtoIdentifierStart(content[i]):
+			start := i
+			i++
+			for i < len(content) && isProtoIdentifierPart(content[i]) {
+				i++
+			}
+			tokens = append(tokens, string(content[start:i]))
+		case content[i] == '{' || content[i] == '}' || content[i] == '=' || content[i] == ';':
+			tokens = append(tokens, string(content[i]))
+			i++
+		default:
+			i++
+		}
+	}
+	return tokens
+}
+
+func isProtoIdentifierStart(value byte) bool {
+	return value == '_' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+func isProtoIdentifierPart(value byte) bool {
+	return isProtoIdentifierStart(value) || value >= '0' && value <= '9'
 }
 
 // protoOuterClassName returns the outer class name for a proto file.
@@ -822,19 +968,48 @@ func protoOuterClassName(fileInfo proto.FileInfo) string {
 	if name == "" {
 		return ""
 	}
-	// Convert to PascalCase (capitalize first letter, handle underscores)
-	return snakeToPascalCase(name)
-}
+	// Convert to PascalCase (capitalize first letter, handle underscores).
+	outerClassName := snakeToPascalCase(name)
 
-// snakeToPascalCase converts a snake_case string to PascalCase.
-func snakeToPascalCase(s string) string {
-	parts := strings.Split(s, "_")
-	for i, part := range parts {
-		if len(part) > 0 {
-			parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	// Protoc's legacy Java outer-class naming appends "OuterClass" when the
+	// filename-derived name conflicts with any message, enum, or service in the
+	// file. Gazelle's proto metadata also includes nested declarations, matching
+	// protoc's recursive message collision check.
+	for _, names := range [][]string{fileInfo.Messages, fileInfo.Enums, fileInfo.Services} {
+		for _, declaredName := range names {
+			if declaredName == outerClassName {
+				return outerClassName + "OuterClass"
+			}
 		}
 	}
-	return strings.Join(parts, "")
+
+	return outerClassName
+}
+
+// snakeToPascalCase converts a proto filename stem to the Java outer-class
+// spelling used by protoc.
+func snakeToPascalCase(s string) string {
+	var result strings.Builder
+	capitalizeNext := true
+	for _, char := range s {
+		switch {
+		case char >= 'a' && char <= 'z':
+			if capitalizeNext {
+				char -= 'a' - 'A'
+			}
+			result.WriteRune(char)
+			capitalizeNext = false
+		case char >= 'A' && char <= 'Z':
+			result.WriteRune(char)
+			capitalizeNext = false
+		case char >= '0' && char <= '9':
+			result.WriteRune(char)
+			capitalizeNext = true
+		default:
+			capitalizeNext = true
+		}
+	}
+	return result.String()
 }
 
 // We exclude intra-target imports because otherwise we'd get self-dependencies come resolve time.
