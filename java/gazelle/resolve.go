@@ -128,7 +128,7 @@ func (jr *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 	if packageConfig == nil {
 		jr.lang.logger.Fatal().Msg("failed retrieving package config")
 	}
-	isTestRule := packageConfig.IsTestRule(r.Kind())
+	isTestRule := isTestRuleKind(c, packageConfig, r.Kind())
 	if ruleIsTestOnly(r) {
 		isTestRule = true
 	}
@@ -153,13 +153,28 @@ func (jr *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 	if ruleHasKotlinSources(r) {
 		jr.addMavenCompileCompanions(c, packageConfig, r, resolveInput, from)
 	}
-	if isKotlinLibrary(r.Kind()) {
+	if isKotlinLibrary(c, r.Kind()) {
 		ensureKotlinExportsAreCompileDeps(c, r, from)
 	}
 
 	jr.populateAssociatesAttr(c, ix, resolveInput, r, isTestRule, from)
 
 	jr.populatePluginsAttr(c, ix, resolveInput, packageConfig, from, isTestRule, r)
+}
+
+// isTestRuleKind recognizes both native test kinds and their map_kind replacements.
+// Gazelle applies kind mappings before dependency resolution, so Resolve sees the
+// replacement symbol rather than java_test_suite.
+func isTestRuleKind(c *config.Config, packageConfig *javaconfig.Config, kind string) bool {
+	if packageConfig.IsTestRule(kind) {
+		return true
+	}
+	for _, mappedKind := range c.KindMap {
+		if mappedKind.KindName == kind && packageConfig.IsTestRule(mappedKind.FromKind) {
+			return true
+		}
+	}
+	return false
 }
 
 // addMavenCompileCompanions puts the same-package dependency companions of a
@@ -1494,15 +1509,23 @@ func (jr *Resolver) tryResolvingToJavaExport(results []resolve.FindResult, from 
 }
 
 func isJvmLibrary(c *config.Config, kind string) bool {
-	return isJavaLibrary(c, kind) || isKotlinLibrary(kind)
+	return isJavaLibrary(c, kind) || isKotlinLibrary(c, kind)
 }
 
 func isJavaLibrary(c *config.Config, kind string) bool {
 	return kind == "java_library" || isJavaProtoLibrary(c, kind)
 }
 
-func isKotlinLibrary(kind string) bool {
-	return kind == "kt_jvm_library"
+func isKotlinLibrary(c *config.Config, kind string) bool {
+	if kind == "kt_jvm_library" {
+		return true
+	}
+	for _, mappedKind := range c.KindMap {
+		if mappedKind.KindName == kind && mappedKind.FromKind == "kt_jvm_library" {
+			return true
+		}
+	}
+	return false
 }
 
 func isJavaProtoLibrary(c *config.Config, kind string) bool {
