@@ -1,6 +1,7 @@
 package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
 import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassName;
+import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassNameInImportPath;
 
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.VirtualFile;
@@ -235,21 +236,19 @@ public class KtParser {
       List<Name> pathSegments = importName.pathSegments();
       for (Name importPart : pathSegments) {
         segmentCount++;
-        // If there is a PascalCase component, assume it's a class.
-        if (isLikelyClassName(importPart.asString())) {
+        // If there is a class-like component, treat that prefix as the outer type.
+        if (isLikelyClassNameInImportPath(
+            importPart.asString(), segmentCount < pathSegments.size())) {
           foundClass = true;
           break;
         }
       }
       if (foundClass) {
-        FqName className = importName;
-        // Walk up to the outermost class-like segment. A deeply nested member import
-        // (e.g. clientsync/ktranslate StringResources.foo.bar.baz) names a member nested
-        // under a class, so the resolvable type is the longest prefix ending in a class
-        // segment -- not just the immediate parent, which would leave a phantom package.
-        while (!className.isRoot() && !isLikelyClassName(className.shortName().asString())) {
-          className = className.parent();
-        }
+        FqName className =
+            new FqName(
+                pathSegments.subList(0, segmentCount).stream()
+                    .map(Name::asString)
+                    .collect(Collectors.joining(".")));
         String localName = importDirective.getAliasName();
         if (localName == null) {
           localName = className.shortName().toString();

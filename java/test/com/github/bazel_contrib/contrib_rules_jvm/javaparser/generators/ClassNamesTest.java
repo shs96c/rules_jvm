@@ -1,6 +1,7 @@
 package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
 import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassName;
+import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassNameInImportPath;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -41,6 +42,13 @@ public class ClassNamesTest {
     assertFalse(isLikelyClassName("HTTP"));
     assertFalse(isLikelyClassName("SQL"));
     assertFalse(isLikelyClassName("IO"));
+  }
+
+  @Test
+  void allCapsClassNamesAreRecognizedInsideImportPaths() {
+    assertTrue(isLikelyClassNameInImportPath("DSL", true));
+    assertFalse(isLikelyClassNameInImportPath("DSL", false));
+    assertFalse(isLikelyClassNameInImportPath("MAX_VALUE", true));
   }
 
   @Test
