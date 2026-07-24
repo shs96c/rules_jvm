@@ -9,6 +9,7 @@ import (
 type lockFile interface {
 	ListDependencies() []string
 	GetDependencyCoordinates(name string) string
+	ListDirectDependencies(name string) []string
 	ListDependencyPackages(name string) []string
 	ListDependencyClasses(name string) []string
 }
@@ -54,6 +55,15 @@ func (f *lockFileV1) GetDependencyCoordinates(name string) string {
 	return name
 }
 
+func (f *lockFileV1) ListDirectDependencies(name string) []string {
+	for _, dep := range f.DependencyTree.Dependencies {
+		if dep.Coord == name {
+			return dep.DirectDependencies
+		}
+	}
+	panic(fmt.Sprintf("did not find dependency information for %s", name))
+}
+
 func (f *lockFileV1) ListDependencyPackages(name string) []string {
 	for _, dep := range f.DependencyTree.Dependencies {
 		if dep.Coord == name {
@@ -88,6 +98,10 @@ func (f *lockFileV2) ListDependencies() []string {
 
 func (f *lockFileV2) GetDependencyCoordinates(name string) string {
 	return name + ":" + f.Artifacts[name].Version
+}
+
+func (f *lockFileV2) ListDirectDependencies(name string) []string {
+	return f.Dependencies[name]
 }
 
 func (f *lockFileV2) ListDependencyPackages(name string) []string {

@@ -150,6 +150,9 @@ func (jr *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 
 	jr.populateAttr(c, packageConfig, r, "deps", resolveInput.ImportedPackageNames, resolveInput.ImportedClasses, ix, isTestRule, from, resolveInput.PackageNames)
 	jr.populateAttr(c, packageConfig, r, "exports", resolveInput.ExportedPackageNames, resolveInput.ExportedClassNames, ix, isTestRule, from, resolveInput.PackageNames)
+	if ruleHasKotlinSources(r) {
+		jr.addMavenCompileCompanions(c, packageConfig, r, resolveInput, from)
+	}
 	if isKotlinLibrary(r.Kind()) {
 		ensureKotlinExportsAreCompileDeps(c, r, from)
 	}
@@ -157,6 +160,71 @@ func (jr *Resolver) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Re
 	jr.populateAssociatesAttr(c, ix, resolveInput, r, isTestRule, from)
 
 	jr.populatePluginsAttr(c, ix, resolveInput, packageConfig, from, isTestRule, r)
+}
+
+// addMavenCompileCompanions puts the same-package dependency companions of a
+// selected Maven artifact on a Kotlin rule's direct compile classpath. It runs
+// after normal resolution so directives, workspace targets, and exact class
+// ownership still choose the root; the Maven graph can only supplement a root
+// that normal resolution actually selected.
+func (jr *Resolver) addMavenCompileCompanions(c *config.Config, pc *javaconfig.Config, r *rule.Rule, resolveInput types.ResolveInput, from label.Label) {
+	compileResolver, ok := jr.lang.mavenResolver.(maven.CompileResolver)
+	if !ok {
+		return
+	}
+
+	packages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	for _, packageSet := range []*sorted_set.SortedSet[types.PackageName]{
+		resolveInput.ImportedPackageNames,
+		resolveInput.ExportedPackageNames,
+	} {
+		if packageSet == nil {
+			continue
+		}
+		for _, pkg := range packageSet.SortedSlice() {
+			packages.Add(pkg)
+		}
+	}
+	for _, classSet := range []*sorted_set.SortedSet[types.ClassName]{
+		resolveInput.ImportedClasses,
+		resolveInput.ExportedClassNames,
+	} {
+		if classSet == nil {
+			continue
+		}
+		for _, className := range classSet.SortedSlice() {
+			packages.Add(className.PackageName())
+		}
+	}
+
+	deps := sorted_set.NewSortedSetFn([]label.Label{}, sorted_set.LabelLess)
+	selected := make([]label.Label, 0, len(r.AttrStrings("deps"))+len(r.AttrStrings("exports")))
+	for _, attrName := range []string{"deps", "exports"} {
+		for _, raw := range r.AttrStrings(attrName) {
+			parsed, err := label.Parse(raw)
+			if err != nil {
+				panic(fmt.Sprintf("error converting Kotlin %s %q to label: %v", attrName, raw, err))
+			}
+			selected = append(selected, parsed.Abs(from.Repo, from.Pkg))
+			if attrName == "deps" {
+				normalized := normalizeLabelPreference(parsed, c.RepoName, from)
+				deps.Add(simplifyLabel(c.RepoName, normalized, from))
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return
+	}
+
+	for _, pkg := range packages.SortedSlice() {
+		for _, companion := range compileResolver.CompileCompanions(pkg, selected, pc.ExcludedArtifacts(), pc.MavenRepositoryName()) {
+			if resolveInput.PackageNames != nil && resolveInput.PackageNames.Contains(pkg) && mavenLabelLooksLikeWorkspaceOwner(companion, from) {
+				continue
+			}
+			deps.Add(simplifyLabel(c.RepoName, companion, from))
+		}
+	}
+	setManagedLabelAttr(r, "deps", deps)
 }
 
 // ensureKotlinExportsAreCompileDeps puts every exported library on this target's own
@@ -489,7 +557,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 		}
 
 		// Try package-level resolution first (fast path)
-		dep, ambiguous := jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
+		dep, ambiguous := jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses, ruleHasKotlinSources(r))
 		if dep != label.NoLabel {
 			resolvedPackageDep := simplifyLabel(c.RepoName, dep, from)
 			if len(classesByPackage[imp]) == 0 {
@@ -889,7 +957,7 @@ func setManagedLabelAttr(r *rule.Rule, attrName string, labels *sorted_set.Sorte
 
 // resolveSinglePackageWithAmbiguity resolves a package import and returns whether there was ambiguity.
 // When ambiguous is true and out is NoLabel, the caller should attempt class-level resolution.
-func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string) (out label.Label, ambiguous bool) {
+func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string, allowMavenCompileGroup bool) (out label.Label, ambiguous bool) {
 	cacheKey := types.NewResolvableJavaPackage(imp, false, false)
 	importSpec := resolve.ImportSpec{Lang: languageName, Imp: cacheKey.String()}
 	if ol, found := resolve.FindRuleWithOverride(c, importSpec, languageName); found {
@@ -925,8 +993,9 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 
 	jr.lang.logger.Debug().Str("parsedImport", imp.Name).Stringer("from", from).Msg("not found yet")
 
+	cacheResult := true
 	defer func() {
-		if out != label.NoLabel {
+		if cacheResult && out != label.NoLabel {
 			jr.internalCache.Add(cacheKey, out)
 		}
 	}()
@@ -953,6 +1022,17 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 		if errors.As(err, &noExternal) {
 			// do not fail, the package might be provided elsewhere
 		} else if errors.As(err, &multipleExternal) {
+			if allowMavenCompileGroup && len(pkgClasses) == 0 {
+				if compileResolver, ok := jr.lang.mavenResolver.(maven.CompileResolver); ok {
+					group, compileErr := compileResolver.ResolveCompilePackage(imp, pc.ExcludedArtifacts(), pc.MavenRepositoryName())
+					if compileErr == nil && len(group) > 0 {
+						// This mode is Kotlin-specific, so do not let its root leak
+						// through the package cache to a later Java-only rule.
+						cacheResult = false
+						return group[0], false
+					}
+				}
+			}
 			// Maven has multiple options (split package) - check if class-level resolution is available
 			if len(pkgClasses) > 0 {
 				// Only signal ambiguity if we have class index data for at least one class
@@ -1026,7 +1106,7 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 }
 
 func (jr *Resolver) resolveSinglePackage(c *config.Config, pc *javaconfig.Config, imp types.PackageName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, ownPackageNames *sorted_set.SortedSet[types.PackageName], pkgClasses []string) (out label.Label) {
-	out, _ = jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
+	out, _ = jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses, false)
 	return out
 }
 

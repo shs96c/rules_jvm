@@ -21,6 +21,14 @@ func Test_loadConfiguration_v1(t *testing.T) {
 	})
 
 	require.Equal(t, cfg.GetDependencyCoordinates("com.google.guava:guava:31.1-jre"), "com.google.guava:guava:31.1-jre")
+	require.ElementsMatch(t, cfg.ListDirectDependencies("com.google.guava:guava:31.1-jre"), []string{
+		"com.google.code.findbugs:jsr305:3.0.2",
+		"com.google.errorprone:error_prone_annotations:2.11.0",
+		"com.google.guava:failureaccess:1.0.1",
+		"com.google.guava:listenablefuture:9999.0-empty-to-avoid-conflict-with-guava",
+		"com.google.j2objc:j2objc-annotations:1.3",
+		"org.checkerframework:checker-qual:3.12.0",
+	})
 
 	require.ElementsMatch(t, cfg.ListDependencyPackages("com.google.guava:guava:31.1-jre"), []string{
 		"com.google.common.annotations",
@@ -59,6 +67,14 @@ func Test_loadConfiguration_v2(t *testing.T) {
 	})
 
 	require.Equal(t, cfg.GetDependencyCoordinates("com.google.guava:guava"), "com.google.guava:guava:31.1-jre")
+	require.ElementsMatch(t, cfg.ListDirectDependencies("com.google.guava:guava"), []string{
+		"com.google.code.findbugs:jsr305",
+		"com.google.errorprone:error_prone_annotations",
+		"com.google.guava:failureaccess",
+		"com.google.guava:listenablefuture",
+		"com.google.j2objc:j2objc-annotations",
+		"org.checkerframework:checker-qual",
+	})
 
 	require.ElementsMatch(t, cfg.ListDependencyPackages("com.google.guava:guava"), []string{
 		"com.google.common.annotations",
@@ -97,6 +113,14 @@ func Test_loadConfiguration_v3(t *testing.T) {
 	})
 
 	require.Equal(t, cfg.GetDependencyCoordinates("com.google.guava:guava"), "com.google.guava:guava:31.1-jre")
+	require.ElementsMatch(t, cfg.ListDirectDependencies("com.google.guava:guava"), []string{
+		"com.google.code.findbugs:jsr305",
+		"com.google.errorprone:error_prone_annotations",
+		"com.google.guava:failureaccess",
+		"com.google.guava:listenablefuture",
+		"com.google.j2objc:j2objc-annotations",
+		"org.checkerframework:checker-qual",
+	})
 
 	require.ElementsMatch(t, cfg.ListDependencyPackages("com.google.guava:guava"), []string{
 		"com.google.common.annotations",

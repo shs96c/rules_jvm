@@ -2,6 +2,7 @@ package maven
 
 import (
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
@@ -96,5 +97,103 @@ func assertResolvesClass(t *testing.T, r Resolver, excludeArtifacts map[string]s
 	want, _ := label.Parse(wantLabelStr)
 	if got != want {
 		t.Errorf("Incorrect label for class %v; want %v got %v", className, want, got)
+	}
+}
+
+func TestResolverMockKCompileCompanions(t *testing.T) {
+	r, err := NewResolver(
+		WithInstallFile("testdata/mockk_maven_install.json"),
+		WithIndexFile("testdata/mockk_maven_index.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compileResolver, ok := r.(CompileResolver)
+	if !ok {
+		t.Fatal("Maven resolver does not implement CompileResolver")
+	}
+
+	none := make(map[string]struct{})
+	assertResolvesClass(t, r, none, "io.mockk.every", "@maven//:io_mockk_mockk_jvm")
+	assertResolvesClass(t, r, none, "io.mockk.MockKAnnotations", "@maven//:io_mockk_mockk_jvm")
+	assertResolvesClass(t, r, none, "io.mockk.Runs", "@maven//:io_mockk_mockk_dsl_jvm")
+	assertResolvesClass(t, r, none, "io.mockk.MockKStubScope", "@maven//:io_mockk_mockk_dsl_jvm")
+	assertResolvesClass(t, r, none, "io.mockk.junit5.MockKExtension", "@maven//:io_mockk_mockk_jvm")
+
+	mockk := types.NewPackageName("io.mockk")
+	t.Run("package-only import has a unique dependency root", func(t *testing.T) {
+		got, err := compileResolver.ResolveCompilePackage(mockk, none, "maven")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertLabelStrings(t, got, []string{
+			"@maven//:io_mockk_mockk_jvm",
+			"@maven//:io_mockk_mockk_dsl_jvm",
+		})
+	})
+
+	t.Run("jvm symbol gets its dsl compile companion", func(t *testing.T) {
+		got := compileResolver.CompileCompanions(mockk, []label.Label{
+			mustParseLabel(t, "@maven//:io_mockk_mockk_jvm"),
+		}, none, "maven")
+		assertLabelStrings(t, got, []string{
+			"@maven//:io_mockk_mockk_jvm",
+			"@maven//:io_mockk_mockk_dsl_jvm",
+		})
+	})
+
+	t.Run("dsl symbol does not pull its dependent backwards", func(t *testing.T) {
+		got := compileResolver.CompileCompanions(mockk, []label.Label{
+			mustParseLabel(t, "@maven//:io_mockk_mockk_dsl_jvm"),
+		}, none, "maven")
+		assertLabelStrings(t, got, []string{"@maven//:io_mockk_mockk_dsl_jvm"})
+	})
+
+	t.Run("unique MockK subpackage stays on jvm", func(t *testing.T) {
+		got, err := compileResolver.ResolveCompilePackage(types.NewPackageName("io.mockk.junit5"), none, "maven")
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertLabelStrings(t, got, []string{"@maven//:io_mockk_mockk_jvm"})
+	})
+
+	t.Run("excluded companion stays excluded", func(t *testing.T) {
+		excluded := map[string]struct{}{
+			"@maven//:io_mockk_mockk_dsl_jvm": {},
+		}
+		got := compileResolver.CompileCompanions(mockk, []label.Label{
+			mustParseLabel(t, "@maven//:io_mockk_mockk_jvm"),
+		}, excluded, "maven")
+		assertLabelStrings(t, got, []string{"@maven//:io_mockk_mockk_jvm"})
+	})
+
+	t.Run("unrelated split owners remain ambiguous", func(t *testing.T) {
+		got, err := compileResolver.ResolveCompilePackage(types.NewPackageName("com.example.split"), none, "maven")
+		if got != nil {
+			t.Fatalf("ResolveCompilePackage() = %v, want no labels", got)
+		}
+		if _, ok := err.(*MultipleExternalImportsError); !ok {
+			t.Fatalf("ResolveCompilePackage() error = %T %v, want *MultipleExternalImportsError", err, err)
+		}
+	})
+}
+
+func mustParseLabel(t *testing.T, value string) label.Label {
+	t.Helper()
+	l, err := label.Parse(value)
+	if err != nil {
+		t.Fatalf("parsing label %q: %v", value, err)
+	}
+	return l
+}
+
+func assertLabelStrings(t *testing.T, got []label.Label, want []string) {
+	t.Helper()
+	gotStrings := make([]string, 0, len(got))
+	for _, l := range got {
+		gotStrings = append(gotStrings, l.String())
+	}
+	if !reflect.DeepEqual(gotStrings, want) {
+		t.Errorf("labels mismatch:\n got: %v\nwant: %v", gotStrings, want)
 	}
 }
