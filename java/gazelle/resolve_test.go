@@ -1180,6 +1180,75 @@ java_library(
 	}
 }
 
+func TestKotlinTestAssociatesOnlyKotlinProductionLibrary(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		mainKind       string
+		mainSource     string
+		wantAssociates []string
+		wantDeps       []string
+	}{
+		{
+			name:       "java production library stays a dependency",
+			mainKind:   "java_library",
+			mainSource: "Main.java",
+			wantDeps:   []string{":main"},
+		},
+		{
+			name:           "kotlin production library becomes an associate",
+			mainKind:       "kt_jvm_library",
+			mainSource:     "Main.kt",
+			wantAssociates: []string{":main"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, langs, _ := testConfig(t)
+			mrslv, exts := InitTestResolversAndExtensions(langs)
+			ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+
+			content := fmt.Sprintf(`%s(
+    name = "main",
+    srcs = ["%s"],
+    _packages = ["com.example"],
+)`, tc.mainKind, tc.mainSource)
+			f, err := rule.LoadData("BUILD.bazel", "", []byte(content))
+			if err != nil {
+				t.Fatal(err)
+			}
+			mainRule := f.Rules[0]
+			setPackagesPrivateAttr(mainRule)
+			ix.AddRule(c, mainRule, f)
+
+			jLang := langs[1].(*javaLang)
+			if tc.mainKind == "kt_jvm_library" {
+				jLang.kotlinLibraries[label.New("", "", "main").String()] = true
+			}
+			ix.Finish()
+
+			testRule := rule.NewRule("kt_jvm_test", "test")
+			testRule.SetAttr("srcs", []string{"Test.kt"})
+			testRule.SetAttr("deps", []string{":main"})
+			resolveInput := types.ResolveInput{
+				PackageNames: sorted_set.NewSortedSetFn(
+					[]types.PackageName{types.NewPackageName("com.example")},
+					types.PackageNameLess,
+				),
+			}
+
+			jLang.Resolver.(*Resolver).populateAssociatesAttr(
+				c, ix, resolveInput, testRule, true, label.New("", "", "test"),
+			)
+
+			if got := testRule.AttrStrings("associates"); !reflect.DeepEqual(got, tc.wantAssociates) {
+				t.Errorf("associates mismatch:\n got: %v\nwant: %v", got, tc.wantAssociates)
+			}
+			if got := testRule.AttrStrings("deps"); !reflect.DeepEqual(got, tc.wantDeps) {
+				t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, tc.wantDeps)
+			}
+		})
+	}
+}
+
 // TestRuleIsTestOnly covers `testonly = True` detection across the two shapes
 // Gazelle has used to store the attribute: older Gazelle emitted
 // `*bzl.LiteralExpr{Token: "True"}` for `SetAttr("testonly", true)`; current
