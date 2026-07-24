@@ -700,7 +700,7 @@ func isGenericWorkspaceToken(token string) bool {
 	}
 }
 
-// Note: This function may modify labels.
+// setLabelAttrIncludingExistingValues is reserved for hand-owned attributes such as plugins.
 func setLabelAttrIncludingExistingValues(r *rule.Rule, attrName string, labels *sorted_set.SortedSet[label.Label]) {
 	for _, implicitDep := range r.AttrStrings(attrName) {
 		l, err := label.Parse(implicitDep)
@@ -709,7 +709,12 @@ func setLabelAttrIncludingExistingValues(r *rule.Rule, attrName string, labels *
 		}
 		labels.Add(l)
 	}
+	setManagedLabelAttr(r, attrName, labels)
+}
 
+// setManagedLabelAttr replaces a Gazelle-managed label list with exactly the
+// inferred labels. Gazelle's merge phase preserves values marked with keep.
+func setManagedLabelAttr(r *rule.Rule, attrName string, labels *sorted_set.SortedSet[label.Label]) {
 	var exprs []build.Expr
 	if labels.Len() > 0 {
 		for _, l := range labels.SortedSlice() {
@@ -719,6 +724,7 @@ func setLabelAttrIncludingExistingValues(r *rule.Rule, attrName string, labels *
 			exprs = append(exprs, &build.StringExpr{Value: l.String()})
 		}
 	}
+	r.DelAttr(attrName)
 	if len(exprs) > 0 {
 		r.SetAttr(attrName, exprs)
 	}
