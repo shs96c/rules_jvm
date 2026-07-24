@@ -1400,6 +1400,75 @@ func javaFileClassesOwnMain(classes map[string]struct{}, main types.ClassName) b
 	}
 }
 
+func existingRuleHasKeep(r *rule.Rule) bool {
+	if r == nil {
+		return false
+	}
+	if r.ShouldKeep() {
+		return true
+	}
+	for _, attrName := range r.AttrKeys() {
+		if commentsHaveKeep(r.AttrComments(attrName)) {
+			return true
+		}
+		if exprHasKeep(r.Attr(attrName)) {
+			return true
+		}
+	}
+	return false
+}
+
+func commentsHaveKeep(comments *bzl.Comments) bool {
+	if comments == nil {
+		return false
+	}
+	for _, comment := range append(comments.Before, comments.Suffix...) {
+		text := strings.TrimSpace(strings.TrimPrefix(comment.Token, "#"))
+		if text == "keep" || strings.HasPrefix(text, "keep: ") {
+			return true
+		}
+	}
+	return false
+}
+
+func exprHasKeep(expr bzl.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	if rule.ShouldKeep(expr) {
+		return true
+	}
+	switch expr := expr.(type) {
+	case *bzl.AssignExpr:
+		return exprHasKeep(expr.RHS)
+	case *bzl.ListExpr:
+		for _, item := range expr.List {
+			if exprHasKeep(item) {
+				return true
+			}
+		}
+	case *bzl.CallExpr:
+		for _, item := range expr.List {
+			if exprHasKeep(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func existingRule(file *rule.File, kind, name string) *rule.Rule {
+	if file == nil {
+		return nil
+	}
+	for _, existing := range file.Rules {
+		if existing.Kind() == kind && existing.Name() == name {
+			return existing
+		}
+	}
+	return nil
+}
+
 func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorted_set.SortedSet[types.ClassName], testOwnedJavaFiles *sorted_set.SortedSet[javaFile], mainLibraryNames map[string]string, res *language.GenerateResult, cfg *javaconfig.Config) {
 	defaultLibraryName := cfg.MapLibraryName(filepath.Base(rel))
 	var testOwnedJavaClasses map[string]struct{}
@@ -1409,6 +1478,9 @@ func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorte
 			testOwnedJavaClasses = indexJavaFileClasses(testOwnedJavaFiles)
 		}
 		if javaFileClassesOwnMain(testOwnedJavaClasses, m) {
+			if existingRuleHasKeep(existingRule(file, "java_binary", m.BareOuterClassName())) {
+				continue
+			}
 			// Gazelle only removes an obsolete existing rule when the generator emits
 			// an Empty stub. Match the default generated name so custom-named,
 			// intentionally hand-owned binaries for the same main remain untouched.

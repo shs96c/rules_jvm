@@ -7,6 +7,7 @@ import (
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java_export_index"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
 	"github.com/bazelbuild/bazel-gazelle/language"
@@ -295,6 +296,29 @@ func TestSuiteOwnedMainDeletionPreservesCustomNamedBinary(t *testing.T) {
 	require.Equal(t, "custom_test_app", file.Rules[0].Name())
 }
 
+func TestSuiteOwnedMainDeletionPreservesKeptDefaultBinary(t *testing.T) {
+	pkg := types.NewPackageName("com.example.scenarios")
+	mainClass := types.NewClassName(pkg, "ScenarioFixtureUnarchiverKt")
+	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
+	testSources := sorted_set.NewSortedSetFn([]javaFile{{
+		pathRelativeToBazelWorkspaceRoot: "src/test/kotlin/com/example/scenarios/ScenarioFixtureUnarchiver.kt",
+		pkg:                              pkg,
+	}}, javaFileLess)
+	file, err := rule.LoadData("BUILD.bazel", "src/test/kotlin/com/example/scenarios", []byte(`java_binary(
+    name = "ScenarioFixtureUnarchiverKt",
+    main_class = "com.example.scenarios.ScenarioFixtureUnarchiverKt",
+    runtime_deps = [":scenario-fixtures"],  # keep
+)
+`))
+	require.NoError(t, err)
+	result := language.GenerateResult{}
+
+	javaLang{}.processJavaBinary(file, "src/test/kotlin/com/example/scenarios", allMains, testSources, nil, &result, javaconfig.New("."))
+
+	require.Empty(t, result.Gen)
+	require.Empty(t, result.Empty)
+}
+
 func TestProductionMainStillGeneratesBinary(t *testing.T) {
 	pkg := types.NewPackageName("com.example")
 	mainClass := types.NewClassName(pkg, "App")
@@ -330,8 +354,14 @@ func TestSccProductionMainsDependOnOwningGroup(t *testing.T) {
 	require.NoError(t, rootConfig.SetModuleGranularity("scc"))
 	configs := c.Exts[languageName].(javaconfig.Configs)
 	configs[moduleRoot] = rootConfig
-	configs[moduleRoot+"/com/example/alpha"] = rootConfig.NewChild()
-	configs[moduleRoot+"/com/example/beta"] = rootConfig.NewChild()
+	for _, rel := range []string{
+		moduleRoot + "/com",
+		moduleRoot + "/com/example",
+		moduleRoot + "/com/example/alpha",
+		moduleRoot + "/com/example/beta",
+	} {
+		configs[rel] = rootConfig.NewChild()
+	}
 
 	l := langs[1].(*javaLang)
 	l.javaPackageCache = map[string]*java.Package{
@@ -810,7 +840,11 @@ func TestIsOwnedByModuleRoot(t *testing.T) {
 func newTestJavaLang(t *testing.T) javaLang {
 	t.Helper()
 	return javaLang{
-		logger: zerolog.New(zerolog.NewTestWriter(t)),
+		logger:           zerolog.New(zerolog.NewTestWriter(t)),
+		javaPackageCache: make(map[string]*java.Package),
+		javaExportIndex:  java_export_index.NewJavaExportIndex(languageName, zerolog.New(zerolog.NewTestWriter(t))),
+		classExportCache: make(map[string]classExportInfo),
+		kotlinLibraries:  make(map[string]bool),
 	}
 }
 

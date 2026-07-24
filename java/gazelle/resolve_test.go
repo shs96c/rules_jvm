@@ -108,12 +108,15 @@ func TestResolveSingleClassPrefersSelfCandidate(t *testing.T) {
 
 			consumer := rule.NewRule("java_library", "app")
 			consumer.SetAttr("deps", []string{"@java//provider_b:lib"})
-			c := &config.Config{RepoName: "java"}
+			c, _, _ := testConfig(t)
+			c.RepoName = "java"
+			pc := javaconfig.New(".")
+			pc.SetResolveToJavaExports(false)
 			preferences := collectExistingLabelPreferences(consumer, "deps", c.RepoName, from)
 
 			got := resolver.resolveSingleClass(
 				c,
-				javaconfig.New("."),
+				pc,
 				className,
 				nil,
 				from,
@@ -231,19 +234,22 @@ func TestResolveSingleClassPrefersConsumerExistingCandidate(t *testing.T) {
 			if len(tc.existing) > 0 {
 				consumer.SetAttr("deps", tc.existing)
 			}
-			c := &config.Config{RepoName: "java"}
+			c, _, _ := testConfig(t)
+			c.RepoName = "java"
+			pc := javaconfig.New(".")
+			pc.SetResolveToJavaExports(false)
 			preferences := collectExistingLabelPreferences(consumer, "deps", c.RepoName, from)
 
 			got := resolver.resolveSingleClass(
 				c,
-				javaconfig.New("."),
+				pc,
 				className,
 				nil,
 				from,
 				false,
 				preferences,
 			)
-			if got != tc.want {
+			if got.String() != tc.want.String() {
 				t.Errorf("resolveSingleClass() = %s, want %s", got, tc.want)
 			}
 		})
@@ -1383,6 +1389,390 @@ java_library(
 	}
 }
 
+func TestPackageResolveDirectiveWinsOverImportedClassFallback(t *testing.T) {
+	c, langs, configurers := testConfig(t)
+	f, err := rule.LoadData("BUILD.bazel", "", []byte(`# gazelle:resolve java kotlin.test @maven//:org_jetbrains_kotlin_kotlin_test_junit5
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, configurer := range configurers {
+		configurer.Configure(c, "", f)
+	}
+	c.Exts[languageName].(javaconfig.Configs)[""] = javaconfig.New(c.RepoRoot)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	ix.Finish()
+
+	testRule := rule.NewRule("java_library", "test")
+	testRule.SetAttr("srcs", []string{"Test.java"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	javaPackage := types.NewPackageName("kotlin.test")
+	resolveInput := types.ResolveInput{
+		PackageNames:         emptyPackages,
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses: sorted_set.NewSortedSetFn(
+			[]types.ClassName{types.NewClassName(javaPackage, "Test")},
+			types.ClassNameLess,
+		),
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+
+	mrslv.Resolver(testRule, "").Resolve(c, ix, testRemoteCache(nil), testRule, resolveInput, label.New("", "", "test"))
+
+	want := []string{"@maven//:org_jetbrains_kotlin_kotlin_test_junit5"}
+	if got := testRule.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestResolvedWorkspacePackageKeepsUndeclaredClassFromCompactMavenFallback(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+
+	javaPackage := types.NewPackageName("com.squareup.cash.loanstar.common")
+	providerContent := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "common",
+    _packages = ["com.squareup.cash.loanstar.common"],
+)
+`
+	providerFile, err := rule.LoadData(filepath.Join("common", "BUILD.bazel"), "common", []byte(providerContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRule := providerFile.Rules[0]
+	setPackagesPrivateAttr(providerRule)
+	ix.AddRule(c, providerRule, providerFile)
+	ix.Finish()
+
+	consumer := rule.NewRule("kt_jvm_library", "consumer")
+	consumer.SetAttr("srcs", []string{"Consumer.kt"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	resolveInput := types.ResolveInput{
+		PackageNames:         emptyPackages,
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses: sorted_set.NewSortedSetFn(
+			[]types.ClassName{types.NewClassName(javaPackage, "topLevelHelper")},
+			types.ClassNameLess,
+		),
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+
+	mrslv.Resolver(consumer, "").Resolve(c, ix, testRemoteCache(nil), consumer, resolveInput, label.New("", "", "consumer"))
+
+	want := []string{"//common"}
+	if got := consumer.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestPublishedWorkspacePackageDoesNotUseCompactMavenFallback(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+
+	javaPackage := types.NewPackageName("com.squareup.cash.loanstar.common.logging")
+	providerContent := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "logging",
+    _packages = ["com.squareup.cash.loanstar.common.logging"],
+)
+`
+	providerFile, err := rule.LoadData(filepath.Join("common", "logging", "BUILD.bazel"), filepath.Join("common", "logging"), []byte(providerContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRule := providerFile.Rules[0]
+	setPackagesPrivateAttr(providerRule)
+
+	var jLang *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			jLang = jl
+			break
+		}
+	}
+	if jLang == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+	jLang.mavenResolver = &publishedWorkspaceMavenResolver{}
+	providerLabel := label.New("", filepath.Join("common", "logging"), "logging")
+	jLang.classExportCache[providerLabel.String()] = classExportInfo{
+		classes:  []types.ClassName{types.NewClassName(javaPackage, "CommonClass")},
+		testonly: false,
+	}
+	ix.AddRule(c, providerRule, providerFile)
+	ix.Finish()
+
+	consumer := rule.NewRule("kt_jvm_library", "consumer")
+	consumer.SetAttr("srcs", []string{"Consumer.kt"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	resolveInput := types.ResolveInput{
+		PackageNames:         emptyPackages,
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses: sorted_set.NewSortedSetFn(
+			[]types.ClassName{
+				types.NewClassName(javaPackage, "CommonClass"),
+				types.NewClassName(javaPackage, "topLevelHelper"),
+			},
+			types.ClassNameLess,
+		),
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+
+	mrslv.Resolver(consumer, "").Resolve(c, ix, testRemoteCache(nil), consumer, resolveInput, label.New("", "", "consumer"))
+
+	want := []string{"//common/logging"}
+	if got := consumer.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestResolvedWorkspacePackageKeepsUndeclaredClassFromPublishedMavenClassFallback(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+
+	javaPackage := types.NewPackageName("com.squareup.cash.utils")
+	providerContent := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "utils",
+    _packages = ["com.squareup.cash.utils"],
+)
+`
+	providerPkg := filepath.Join("common", "src", "main", "kotlin", "com", "squareup", "cash", "utils")
+	providerFile, err := rule.LoadData(filepath.Join(providerPkg, "BUILD.bazel"), providerPkg, []byte(providerContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRule := providerFile.Rules[0]
+	setPackagesPrivateAttr(providerRule)
+
+	var jLang *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			jLang = jl
+			break
+		}
+	}
+	if jLang == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+	jLang.mavenResolver = &publishedWorkspaceMavenResolver{}
+
+	ix.AddRule(c, providerRule, providerFile)
+	ix.Finish()
+
+	from := label.New("", "service/src/main/kotlin/com/squareup/cash/loanstar", "actions")
+	c.Exts[languageName].(javaconfig.Configs)[from.Pkg] = javaconfig.New(c.RepoRoot)
+	consumer := rule.NewRule("kt_jvm_library", "actions")
+	consumer.SetAttr("srcs", []string{"Actions.kt"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	resolveInput := types.ResolveInput{
+		PackageNames:         emptyPackages,
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses: sorted_set.NewSortedSetFn(
+			[]types.ClassName{types.NewClassName(javaPackage, "KotlinDuration")},
+			types.ClassNameLess,
+		),
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+
+	mrslv.Resolver(consumer, "").Resolve(c, ix, testRemoteCache(nil), consumer, resolveInput, from)
+
+	want := []string{"//common/src/main/kotlin/com/squareup/cash/utils"}
+	if got := consumer.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestOwnedPackageDoesNotResolveToPublishedWorkspaceMavenArtifact(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	ix.Finish()
+
+	var jLang *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			jLang = jl
+			break
+		}
+	}
+	if jLang == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+	jLang.mavenResolver = &publishedWorkspaceMavenResolver{}
+
+	from := label.New("", "service/src/main/kotlin/com/squareup/cash/loanstar", "actions")
+	c.Exts[languageName].(javaconfig.Configs)[from.Pkg] = javaconfig.New(c.RepoRoot)
+
+	javaPackage := types.NewPackageName("com.squareup.cash.loanstar")
+	consumer := rule.NewRule("kt_jvm_library", "actions")
+	consumer.SetAttr("srcs", []string{"Actions.kt"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	resolveInput := types.ResolveInput{
+		PackageNames:         sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses:      emptyClasses,
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+
+	mrslv.Resolver(consumer, "").Resolve(
+		c,
+		ix,
+		testRemoteCache(nil),
+		consumer,
+		resolveInput,
+		from,
+	)
+
+	if got := consumer.AttrStrings("deps"); len(got) != 0 {
+		t.Errorf("deps mismatch:\n got: %v\nwant: []", got)
+	}
+}
+
+func TestOwnedPackageDoesNotAddPublishedWorkspaceMavenCompileCompanion(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	ix.Finish()
+
+	var jLang *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			jLang = jl
+			break
+		}
+	}
+	if jLang == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+	jLang.mavenResolver = &publishedWorkspaceCompileResolver{}
+
+	from := label.New("", "service/src/main/kotlin/com/squareup/cash/loanstar", "actions")
+	c.Exts[languageName].(javaconfig.Configs)[from.Pkg] = javaconfig.New(c.RepoRoot)
+
+	javaPackage := types.NewPackageName("com.squareup.cash.loanstar")
+	consumer := rule.NewRule("kt_jvm_library", "actions")
+	consumer.SetAttr("srcs", []string{"Actions.kt"})
+	consumer.SetAttr("deps", []string{"@maven//:com_squareup_loanstar_service"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	resolveInput := types.ResolveInput{
+		PackageNames:         sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses:      emptyClasses,
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+
+	mrslv.Resolver(consumer, "").Resolve(
+		c,
+		ix,
+		testRemoteCache(nil),
+		consumer,
+		resolveInput,
+		from,
+	)
+
+	want := []string{"@maven//:com_squareup_loanstar_service"}
+	if got := consumer.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestMavenLabelLooksLikeWorkspaceOwner(t *testing.T) {
+	tests := []struct {
+		name       string
+		mavenLabel label.Label
+		owner      label.Label
+		want       bool
+	}{
+		{
+			name:       "published subpackage owner",
+			mavenLabel: label.New("maven", "", "com_squareup_loanstar_common"),
+			owner:      label.New("", "common/src/main/kotlin/com/squareup/cash/loanstar/common/logging", "logging"),
+			want:       true,
+		},
+		{
+			name:       "published root package owner",
+			mavenLabel: label.New("maven", "", "com_squareup_loanstar_common"),
+			owner:      label.New("", "service/src/main/kotlin/com/squareup/cash/loanstar", "actions"),
+			want:       true,
+		},
+		{
+			name:       "external split package helper",
+			mavenLabel: label.New("maven", "", "com_google_guava_guava"),
+			owner:      label.New("", "local", "local_helper"),
+			want:       false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := mavenLabelLooksLikeWorkspaceOwner(tc.mavenLabel, tc.owner); got != tc.want {
+				t.Fatalf("mavenLabelLooksLikeWorkspaceOwner() = %t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+type publishedWorkspaceMavenResolver struct{}
+
+func (*publishedWorkspaceMavenResolver) Resolve(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
+	if pkg.Name == "com.squareup.cash.loanstar" || pkg.Name == "com.squareup.cash.loanstar.common" || pkg.Name == "com.squareup.cash.loanstar.common.logging" {
+		return label.New(mavenRepositoryName, "", "com_squareup_loanstar_common"), nil
+	}
+	return label.NoLabel, &maven.NoExternalImportsError{PackageName: pkg.Name}
+}
+
+func (*publishedWorkspaceMavenResolver) ResolveClass(className types.ClassName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) (label.Label, error) {
+	if className.FullyQualifiedClassName() == "com.squareup.cash.utils.KotlinDuration" {
+		return label.New(mavenRepositoryName, "", "com_squareup_loanstar_common"), nil
+	}
+	return label.NoLabel, nil
+}
+
+type publishedWorkspaceCompileResolver struct {
+	publishedWorkspaceMavenResolver
+}
+
+func (*publishedWorkspaceCompileResolver) ResolveCompilePackage(pkg types.PackageName, excludedArtifacts map[string]struct{}, mavenRepositoryName string) ([]label.Label, error) {
+	return nil, &maven.NoExternalImportsError{PackageName: pkg.Name}
+}
+
+func (*publishedWorkspaceCompileResolver) CompileCompanions(pkg types.PackageName, selected []label.Label, excludedArtifacts map[string]struct{}, mavenRepositoryName string) []label.Label {
+	if pkg.Name != "com.squareup.cash.loanstar" {
+		return nil
+	}
+	return []label.Label{
+		label.New(mavenRepositoryName, "", "com_squareup_loanstar_service"),
+		label.New(mavenRepositoryName, "", "com_squareup_loanstar_common"),
+	}
+}
+
 func TestKotlinTestAssociatesOnlyKotlinProductionLibrary(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -1596,6 +1986,80 @@ func TestProductionAssociatesCrossPackageWithConfiguredKotlinModule(t *testing.T
 	}
 }
 
+func TestKotlinTestAssociatesSplitPackageProductionClassOwner(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	c.RepoName = "java"
+	from := label.New("", "service/creditlines/src/test/kotlin/com/example/creditlines", "CreditUtilizationFacadeTest")
+	c.Exts[languageName].(javaconfig.Configs)[from.Pkg] = javaconfig.New(c.RepoRoot)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	jLang := langs[1].(*javaLang)
+
+	const mainPkg = "service/creditlines/src/main/kotlin/com/example/creditlines"
+	javaPackage := types.NewPackageName("com.example.creditlines")
+	f, err := rule.LoadData(filepath.Join(mainPkg, "BUILD.bazel"), mainPkg, []byte(`kt_jvm_library(
+    name = "creditlimits",
+    srcs = ["CreditLineSnapshot.kt"],
+    _packages = ["com.example.creditlines"],
+)
+
+kt_jvm_library(
+    name = "loanconfig",
+    srcs = ["LoanConfig.kt"],
+    _packages = ["com.example.creditlines"],
+)
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, productionRule := range f.Rules {
+		setPackagesPrivateAttr(productionRule)
+		productionLabel := label.New("", f.Pkg, productionRule.Name())
+		jLang.kotlinLibraries[productionLabel.String()] = true
+		className := strings.TrimSuffix(productionRule.AttrStrings("srcs")[0], ".kt")
+		jLang.classExportCache[productionLabel.String()] = classExportInfo{
+			classes: []types.ClassName{types.NewClassName(javaPackage, className)},
+		}
+		ix.AddRule(c, productionRule, f)
+	}
+	ix.Finish()
+
+	mainSpec := resolve.ImportSpec{Lang: languageName, Imp: types.NewResolvableJavaPackage(javaPackage, false, false).String()}
+	if got := len(ix.FindRulesByImportWithConfig(c, mainSpec, languageName)); got != 2 {
+		t.Fatalf("indexed production providers = %d, want 2", got)
+	}
+
+	testRule := rule.NewRule("java_test_suite", "CreditUtilizationFacadeTest")
+	testRule.SetAttr("srcs", []string{"CreditUtilizationFacadeTest.kt"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	resolveInput := types.ResolveInput{
+		PackageNames:         sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses: sorted_set.NewSortedSetFn(
+			[]types.ClassName{types.NewClassName(javaPackage, "CreditLineSnapshot")},
+			types.ClassNameLess,
+		),
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+	resolver := jLang.Resolver.(*Resolver)
+	associateLabels := resolver.productionAssociateLabels(c, c.Exts[languageName].(javaconfig.Configs)[from.Pkg], ix, resolveInput, javaPackage, from)
+	if got := associateLabels.SortedSlice(); len(got) != 1 {
+		t.Fatalf("productionAssociateLabels() = %v, want one class owner", got)
+	}
+	resolver.Resolve(c, ix, testRemoteCache(nil), testRule, resolveInput, from)
+
+	want := []string{"//service/creditlines/src/main/kotlin/com/example/creditlines:creditlimits"}
+	if got := testRule.AttrStrings("associates"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("associates = %v, want %v", got, want)
+	}
+	if got := testRule.AttrStrings("deps"); len(got) != 0 {
+		t.Fatalf("deps = %v, want none", got)
+	}
+}
+
 func TestKotlinTestAssociatesRequireOneModuleIdentity(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -1608,14 +2072,14 @@ func TestKotlinTestAssociatesRequireOneModuleIdentity(t *testing.T) {
 			name:           "same explicit identity",
 			moduleA:        "shared_main",
 			moduleB:        "shared_main",
-			wantAssociates: []string{"//main/a:a", "//main/b:b"},
+			wantAssociates: []string{"//main/a", "//main/b"},
 			wantDeps:       []string{":unrelated"},
 		},
 		{
 			name:     "different explicit identities stay dependencies",
 			moduleA:  "main_a",
 			moduleB:  "main_b",
-			wantDeps: []string{":unrelated", "//main/a:a", "//main/b:b"},
+			wantDeps: []string{":unrelated", "//main/a", "//main/b"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

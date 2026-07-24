@@ -55,3 +55,6 @@ func TestResolveMavenWholePackageClassNoUniquePrefix(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got != label.NoLabel {
+		t.Fatalf("resolveMavenWholePackageClass() = %s, want no label", got)
+	}
+}
