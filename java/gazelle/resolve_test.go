@@ -131,6 +131,64 @@ func TestResolveSingleClassPrefersSelfCandidate(t *testing.T) {
 	}
 }
 
+func TestResolveKotlinReflectionFunctionClass(t *testing.T) {
+	config := javaconfig.New(".")
+	config.SetMavenRepositoryName("custom_maven")
+	wantReflect := maven.LabelFromArtifact("custom_maven", "org.jetbrains.kotlin:kotlin-reflect")
+
+	for name, tc := range map[string]struct {
+		className string
+		want      label.Label
+	}{
+		"zero arity": {
+			className: "kotlin.reflect.KFunction0",
+			want:      wantReflect,
+		},
+		"multi-digit arity": {
+			className: "kotlin.reflect.KFunction123",
+			want:      wantReflect,
+		},
+		"missing arity": {
+			className: "kotlin.reflect.KFunction",
+			want:      label.NoLabel,
+		},
+		"plural name": {
+			className: "kotlin.reflect.KFunctions",
+			want:      label.NoLabel,
+		},
+		"suffix after arity": {
+			className: "kotlin.reflect.KFunction3Suffix",
+			want:      label.NoLabel,
+		},
+		"nested suffix after arity": {
+			className: "kotlin.reflect.KFunction3.Inner",
+			want:      label.NoLabel,
+		},
+		"non-ASCII digit": {
+			className: "kotlin.reflect.KFunction٣",
+			want:      label.NoLabel,
+		},
+		"other reflection type": {
+			className: "kotlin.reflect.KProperty0",
+			want:      label.NoLabel,
+		},
+		"nested reflection package": {
+			className: "kotlin.reflect.full.KFunction3",
+			want:      label.NoLabel,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			className, err := types.ParseClassName(tc.className)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := resolveKotlinReflectionFunctionClass(config, *className); got != tc.want {
+				t.Errorf("resolveKotlinReflectionFunctionClass(%q) = %s, want %s", tc.className, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResolveSingleClassPrefersConsumerExistingCandidate(t *testing.T) {
 	javaPackage := types.NewPackageName("com.example.duplicate")
 	className := types.NewClassName(javaPackage, "Duplicate")
@@ -645,6 +703,25 @@ func TestResolveMavenWholePackageClass(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := label.New("maven", "", "com_google_guava_guava")
+	if got != want {
+		t.Fatalf("resolveMavenWholePackageClass() = %s, want %s", got, want)
+	}
+}
+
+func TestResolveMavenWholePackageClassPrefersKotlinReflectionFunction(t *testing.T) {
+	lang := &javaLang{mavenResolver: NewTestMavenResolver()}
+	resolver := NewResolver(lang)
+	config := javaconfig.New(".")
+	className, err := types.ParseClassName("kotlin.reflect.KFunction3")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolver.resolveMavenWholePackageClass(config, *className)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := maven.LabelFromArtifact("maven", "org.jetbrains.kotlin:kotlin-reflect")
 	if got != want {
 		t.Fatalf("resolveMavenWholePackageClass() = %s, want %s", got, want)
 	}
