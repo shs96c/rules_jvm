@@ -58,23 +58,28 @@ java_library(
 	}
 
 	suiteContent := `java_test_suite(
-    name = "suite",
+    name = "suite-one",
+)
+
+java_test_suite(
+    name = "suite-two",
 )
 `
 	suiteFile, err := rule.LoadData(filepath.Join("helpers", "BUILD.bazel"), "helpers", []byte(suiteContent))
 	if err != nil {
 		t.Fatal(err)
 	}
-	suiteRule := suiteFile.Rules[0]
-	suiteRule.SetPrivateAttr(packagesKey, []types.ResolvableJavaPackage{
-		*types.NewResolvableJavaPackage(javaPackage, true, true),
-	})
-	helperLabel := label.New("", "helpers", "suite-test-lib")
-	jLang.classExportCache[helperLabel.String()] = classExportInfo{
-		classes:  []types.ClassName{types.NewClassName(javaPackage, "Helper")},
-		testonly: true,
+	for i, suiteRule := range suiteFile.Rules {
+		suiteRule.SetPrivateAttr(packagesKey, []types.ResolvableJavaPackage{
+			*types.NewResolvableJavaPackage(javaPackage, true, true),
+		})
+		helperLabel := label.New("", "helpers", suiteRule.Name()+"-test-lib")
+		jLang.classExportCache[helperLabel.String()] = classExportInfo{
+			classes:  []types.ClassName{types.NewClassName(javaPackage, []string{"OtherHelper", "Helper"}[i])},
+			testonly: true,
+		}
+		ix.AddRule(c, suiteRule, suiteFile)
 	}
-	ix.AddRule(c, suiteRule, suiteFile)
 	ix.Finish()
 
 	productionSpec := resolve.ImportSpec{Lang: languageName, Imp: types.NewResolvableJavaPackage(javaPackage, false, false).String()}
@@ -103,8 +108,8 @@ java_library(
 	mrslv.Resolver(importerRule, "").Resolve(c, ix, rc, importerRule, resolveInput, label.New("", "", "consumer"))
 
 	got := importerRule.AttrStrings("deps")
-	if len(got) != 1 || got[0] != "//helpers:suite-test-lib" {
-		t.Errorf("deps mismatch: got %v, want [//helpers:suite-test-lib]", got)
+	if len(got) != 1 || got[0] != "//helpers:suite-two-test-lib" {
+		t.Errorf("deps mismatch: got %v, want [//helpers:suite-two-test-lib]", got)
 	}
 }
 
