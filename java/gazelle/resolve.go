@@ -297,6 +297,7 @@ func findClassRuleWithOverride(c *config.Config, className types.ClassName) (lab
 
 func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rule.Rule, attrName string, requiredPackageNames *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], ix *resolve.RuleIndex, isTestRule bool, from label.Label, ownPackageNames *sorted_set.SortedSet[types.PackageName]) {
 	labels := sorted_set.NewSortedSetFn[label.Label]([]label.Label{}, sorted_set.LabelLess)
+	preferredExistingLabels := collectExistingLabelPreferences(r, attrName, c.RepoName, from)
 
 	// Build a map of package -> classes for efficient lookup during class-level resolution
 	classesByPackage := make(map[types.PackageName][]types.ClassName)
@@ -357,7 +358,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					l = label.NoLabel
 				}
 				if l == label.NoLabel {
-					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule)
+					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule, preferredExistingLabels)
 				}
 				if l == label.NoLabel {
 					l, err = jr.resolveMavenWholePackageClass(pc, className)
@@ -409,7 +410,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					// A test may import a class from a testonly library (e.g. a testFixtures source
 					// set) whose package the resolved production target also owns; the in-repo class
 					// index includes testonly providers for test rules.
-					if l := jr.resolveSingleClass(c, pc, className, ix, from, true); l != label.NoLabel {
+					if l := jr.resolveSingleClass(c, pc, className, ix, from, true, preferredExistingLabels); l != label.NoLabel {
 						labels.Add(l)
 						continue
 					}
@@ -466,7 +467,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					l = label.NoLabel
 				}
 				if l == label.NoLabel {
-					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule)
+					l = jr.resolveSingleClass(c, pc, className, ix, from, isTestRule, preferredExistingLabels)
 				}
 				if l == label.NoLabel && isTestRule {
 					l = jr.resolveTestSuiteHelperClass(c, imp, className, ix, from)
@@ -508,7 +509,7 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 				labels.Add(simplifyLabel(c.RepoName, l, from))
 				continue
 			}
-			if l := jr.resolveSingleClass(c, pc, className, ix, from, isTestRule); l != label.NoLabel {
+			if l := jr.resolveSingleClass(c, pc, className, ix, from, isTestRule, preferredExistingLabels); l != label.NoLabel {
 				labels.Add(simplifyLabel(c.RepoName, l, from))
 				continue
 			}
@@ -584,6 +585,62 @@ func simplifyLabel(repoName string, l label.Label, from label.Label) label.Label
 		}
 	}
 	return l
+}
+
+// normalizeLabelPreference gives relative, absolute-current-repository, and
+// explicit-current-repository spellings the same identity for comparison.
+func normalizeLabelPreference(l label.Label, repoName string, from label.Label) label.Label {
+	l = l.Abs(from.Repo, from.Pkg)
+	if l.Repo == repoName || l.Repo == from.Repo {
+		l.Repo = ""
+	}
+	l.Relative = false
+	l.Canonical = false
+	return l
+}
+
+// collectExistingLabelPreferences snapshots a managed attribute before resolution
+// replaces it. Existing edges are only tie-breakers between otherwise ambiguous
+// exact-class workspace providers; they are not copied into the generated attribute.
+func collectExistingLabelPreferences(r *rule.Rule, attrName, repoName string, from label.Label) map[label.Label]struct{} {
+	preferences := make(map[label.Label]struct{})
+	for _, raw := range r.AttrStrings(attrName) {
+		l, err := label.Parse(raw)
+		if err != nil {
+			continue
+		}
+		preferences[normalizeLabelPreference(l, repoName, from)] = struct{}{}
+	}
+	return preferences
+}
+
+// selfClassCandidate returns the candidate owned by the rule being resolved.
+// Local ownership takes precedence over preferences for another provider.
+func selfClassCandidate(candidates []label.Label, repoName string, from label.Label) label.Label {
+	normalizedFrom := normalizeLabelPreference(from, repoName, from)
+	for _, candidate := range candidates {
+		if normalizeLabelPreference(candidate, repoName, from) == normalizedFrom {
+			return candidate
+		}
+	}
+	return label.NoLabel
+}
+
+func preferredExistingClassCandidate(candidates []label.Label, preferences map[label.Label]struct{}, repoName string, from label.Label) label.Label {
+	matches := make(map[label.Label]label.Label)
+	for _, candidate := range candidates {
+		normalized := normalizeLabelPreference(candidate, repoName, from)
+		if _, preferred := preferences[normalized]; preferred {
+			matches[normalized] = candidate
+		}
+	}
+	if len(matches) != 1 {
+		return label.NoLabel
+	}
+	for _, candidate := range matches {
+		return candidate
+	}
+	return label.NoLabel
 }
 
 // setLabelAttrIncludingExistingValues is reserved for hand-owned attributes such as plugins.
@@ -834,7 +891,7 @@ func (jr *Resolver) buildPackageClassIndex(c *config.Config, pkg types.PackageNa
 	return pci
 }
 
-func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, className types.ClassName, ix *resolve.RuleIndex, from label.Label, isTestRule bool) (out label.Label) {
+func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, className types.ClassName, ix *resolve.RuleIndex, from label.Label, isTestRule bool, preferredExistingLabels map[label.Label]struct{}) (out label.Label) {
 	imp := className.FullyQualifiedClassName()
 	// Check for manual override first
 	if ol, found := findClassRuleWithOverride(c, className); found {
@@ -867,6 +924,10 @@ func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, 
 		return simplifyLabel(c.RepoName, candidates[0], from)
 	}
 
+	if self := selfClassCandidate(candidates, c.RepoName, from); self != label.NoLabel {
+		return simplifyLabel(c.RepoName, self, from)
+	}
+
 	// Multiple candidates - try java_export narrowing
 	if pc.ResolveToJavaExports() {
 		results := make([]resolve.FindResult, 0, len(candidates))
@@ -879,6 +940,10 @@ func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, 
 		}
 	}
 
+	if preferred := preferredExistingClassCandidate(candidates, preferredExistingLabels, c.RepoName, from); preferred != label.NoLabel {
+		return simplifyLabel(c.RepoName, preferred, from)
+	}
+
 	// Still ambiguous - log error
 	labels := make([]string, 0, len(candidates))
 	for _, l := range candidates {
@@ -889,6 +954,7 @@ func (jr *Resolver) resolveSingleClass(c *config.Config, pc *javaconfig.Config, 
 	jr.lang.logger.Error().
 		Str("class", imp).
 		Strs("targets", labels).
+		Stringer("from", from).
 		Msg("resolveSingleClass found MULTIPLE providers for class")
 
 	return label.NoLabel

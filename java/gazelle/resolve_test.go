@@ -85,6 +85,113 @@ func TestSetLabelAttrIncludingExistingValuesPreservesPlugins(t *testing.T) {
 	}
 }
 
+func TestResolveSingleClassPrefersSelfCandidate(t *testing.T) {
+	javaPackage := types.NewPackageName("com.example.duplicate")
+	className := types.NewClassName(javaPackage, "Duplicate")
+	from := label.New("java", "consumer", "app")
+	other := label.New("java", "provider_b", "lib")
+
+	for name, self := range map[string]label.Label{
+		"explicit current repository spelling": label.New("java", "consumer", "app"),
+		"absolute workspace spelling":          label.New("", "consumer", "app"),
+		"relative spelling":                    {Name: "app", Relative: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lang := newTestJavaLang(t)
+			resolver := NewResolver(&lang)
+			resolver.classIndex[javaPackage] = &packageClassIndex{
+				prod: map[string][]label.Label{
+					"Duplicate": {other, self},
+				},
+				test: make(map[string][]label.Label),
+			}
+
+			consumer := rule.NewRule("java_library", "app")
+			consumer.SetAttr("deps", []string{"@java//provider_b:lib"})
+			c := &config.Config{RepoName: "java"}
+			preferences := collectExistingLabelPreferences(consumer, "deps", c.RepoName, from)
+
+			got := resolver.resolveSingleClass(
+				c,
+				javaconfig.New("."),
+				className,
+				nil,
+				from,
+				false,
+				preferences,
+			)
+			want := simplifyLabel(c.RepoName, self, from)
+			if got != want {
+				t.Errorf("resolveSingleClass() = %s, want self candidate %s", got, want)
+			}
+		})
+	}
+}
+
+func TestResolveSingleClassPrefersConsumerExistingCandidate(t *testing.T) {
+	javaPackage := types.NewPackageName("com.example.duplicate")
+	className := types.NewClassName(javaPackage, "Duplicate")
+	from := label.New("java", "consumer", "app")
+	providerA := label.New("", "consumer", "provider_a")
+	providerB := label.New("java", "provider_b", "lib")
+
+	for name, tc := range map[string]struct {
+		existing []string
+		want     label.Label
+	}{
+		"relative native edge selects candidate": {
+			existing: []string{":provider_a"},
+			want:     label.Label{Name: "provider_a", Relative: true},
+		},
+		"explicit current repository edge selects candidate": {
+			existing: []string{"@java//provider_b:lib"},
+			want:     label.New("", "provider_b", "lib"),
+		},
+		"no existing edge remains ambiguous": {
+			want: label.NoLabel,
+		},
+		"stale non-candidate edge remains ambiguous": {
+			existing: []string{"//stale:lib"},
+			want:     label.NoLabel,
+		},
+		"multiple matching existing edges remain ambiguous": {
+			existing: []string{":provider_a", "//provider_b:lib"},
+			want:     label.NoLabel,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lang := newTestJavaLang(t)
+			resolver := NewResolver(&lang)
+			resolver.classIndex[javaPackage] = &packageClassIndex{
+				prod: map[string][]label.Label{
+					"Duplicate": {providerA, providerB},
+				},
+				test: make(map[string][]label.Label),
+			}
+
+			consumer := rule.NewRule("java_library", "app")
+			if len(tc.existing) > 0 {
+				consumer.SetAttr("deps", tc.existing)
+			}
+			c := &config.Config{RepoName: "java"}
+			preferences := collectExistingLabelPreferences(consumer, "deps", c.RepoName, from)
+
+			got := resolver.resolveSingleClass(
+				c,
+				javaconfig.New("."),
+				className,
+				nil,
+				from,
+				false,
+				preferences,
+			)
+			if got != tc.want {
+				t.Errorf("resolveSingleClass() = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestImports(t *testing.T) {
 	type buildFile struct {
 		rel, content string
