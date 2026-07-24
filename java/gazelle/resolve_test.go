@@ -508,6 +508,47 @@ kt_jvm_library(
 	}
 }
 
+func TestKotlinExportsAreAlsoCompileDeps(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	ix.Finish()
+
+	r := rule.NewRule("kt_jvm_library", "consumer")
+	r.SetAttr("srcs", []string{"Consumer.kt"})
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	exportedPackages := sorted_set.NewSortedSetFn(
+		[]types.PackageName{types.NewPackageName("com.google.common.primitives")},
+		types.PackageNameLess,
+	)
+	resolveInput := types.ResolveInput{
+		PackageNames:         emptyPackages,
+		ImportedPackageNames: emptyPackages,
+		ImportedClasses:      emptyClasses,
+		ExportedPackageNames: exportedPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
+	}
+
+	mrslv.Resolver(r, "").Resolve(
+		c,
+		ix,
+		testRemoteCache(nil),
+		r,
+		resolveInput,
+		label.New("", "", r.Name()),
+	)
+
+	want := []string{"@maven//:com_google_guava_guava"}
+	if got := r.AttrStrings("exports"); !reflect.DeepEqual(got, want) {
+		t.Errorf("exports mismatch:\n got: %v\nwant: %v", got, want)
+	}
+	if got := r.AttrStrings("deps"); !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
 func testRemoteCache(knownRepos []repo.Repo) *repo.RemoteCache {
 	rc, _ := repo.NewRemoteCache(knownRepos)
 	rc.RepoRootForImportPath = stubRepoRootForImportPath
