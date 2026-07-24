@@ -375,16 +375,30 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 		// Try package-level resolution first (fast path)
 		dep, ambiguous := jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
 		if dep != label.NoLabel {
-			labels.Add(simplifyLabel(c.RepoName, dep, from))
+			resolvedPackageDep := simplifyLabel(c.RepoName, dep, from)
+			if len(classesByPackage[imp]) == 0 {
+				labels.Add(resolvedPackageDep)
+				continue
+			}
 
 			// The package resolved unambiguously to a single target, but an external
-			// gazelle plugin (e.g. a proto/wire generator) may own some classes of the same
-			// package. Class import specs are never registered in the global index, so a
-			// class-level lookup always falls through to registered CrossResolvers. Only
-			// probe classes the resolved target doesn't already declare, to keep the fast
-			// path fast when there is no external provider.
+			// gazelle plugin or Maven artifact may own some classes of the same package.
+			// Resolve each imported class independently when the package target does not
+			// declare it. This keeps a workspace helper that owns one class from claiming
+			// every Maven class in the enclosing package.
 			for _, className := range classesByPackage[imp] {
 				if jr.ruleDeclaresClass(dep, className) {
+					labels.Add(resolvedPackageDep)
+					continue
+				}
+
+				l, err := jr.lang.mavenResolver.ResolveClass(className, pc.ExcludedArtifacts(), pc.MavenRepositoryName())
+				if err != nil {
+					jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+					l = label.NoLabel
+				}
+				if l != label.NoLabel {
+					labels.Add(simplifyLabel(c.RepoName, l, from))
 					continue
 				}
 				if l := jr.resolveClassFromCrossResolver(c, pc, className, ix, from); l != label.NoLabel {
@@ -408,6 +422,21 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 						continue
 					}
 				}
+
+				// Compact Maven indexes record a unique package owner instead of every
+				// class. Consult that owner only after exact workspace and generated-code
+				// providers miss. If Maven does not own the package, retain the package
+				// target for symbols such as Kotlin top-level functions that do not appear
+				// in the declared-class index.
+				l, err = jr.resolveMavenWholePackageClass(pc, className)
+				if err != nil {
+					jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+				}
+				if l != label.NoLabel {
+					labels.Add(simplifyLabel(c.RepoName, l, from))
+					continue
+				}
+				labels.Add(resolvedPackageDep)
 			}
 			continue
 		}
@@ -467,17 +496,43 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 
 	// A class whose package this rule owns is normally assumed to be provided by the rule
 	// itself, so that package is filtered out of requiredPackageNames and the loop above
-	// never visits it. But an external gazelle plugin (e.g. notification-builder's Campaigns)
-	// can provide a class in a package the rule otherwise owns -- a split package. The
-	// generate step keeps such a class in importedClasses precisely because the rule does
-	// not declare it, so consult registered CrossResolvers for its real provider.
+	// never visits it. The generate step keeps undeclared classes in importedClasses so
+	// split-package owners from directives, Maven, or another Gazelle plugin can still be
+	// selected here.
 	if importedClasses != nil && ownPackageNames != nil {
 		for _, className := range importedClasses.SortedSlice() {
 			if !ownPackageNames.Contains(className.PackageName()) {
 				continue
 			}
+			if l, found := findClassRuleWithOverride(c, className); found {
+				labels.Add(simplifyLabel(c.RepoName, l, from))
+				continue
+			}
+			if l := jr.resolveSingleClass(c, pc, className, ix, from, isTestRule); l != label.NoLabel {
+				labels.Add(simplifyLabel(c.RepoName, l, from))
+				continue
+			}
+
+			l, err := jr.lang.mavenResolver.ResolveClass(className, pc.ExcludedArtifacts(), pc.MavenRepositoryName())
+			if err != nil {
+				jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+				l = label.NoLabel
+			}
+			if l != label.NoLabel {
+				labels.Add(simplifyLabel(c.RepoName, l, from))
+				continue
+			}
 			if l := jr.resolveClassFromCrossResolver(c, pc, className, ix, from); l != label.NoLabel {
 				labels.Add(l)
+				continue
+			}
+
+			l, err = jr.resolveMavenWholePackageClass(pc, className)
+			if err != nil {
+				jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+			}
+			if l != label.NoLabel {
+				labels.Add(simplifyLabel(c.RepoName, l, from))
 			}
 		}
 	}

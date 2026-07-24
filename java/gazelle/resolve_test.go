@@ -745,6 +745,200 @@ java_library(
 	}
 }
 
+// TestMavenClassLevelSplitPackage covers a package with one in-repo helper and
+// all remaining classes in a compact whole-package Maven index. The importer
+// uses one class from each owner and must not assign the Maven class to the
+// workspace helper merely because that helper is the package's lone workspace
+// provider.
+func TestMavenClassLevelSplitPackage(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	rc := testRemoteCache(nil)
+
+	javaPackage := types.NewPackageName("com.google.common.primitives")
+	localContent := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "local_helper",
+    _packages = ["com.google.common.primitives"],
+    visibility = ["//:__subpackages__"],
+)
+`
+	localFile, err := rule.LoadData(filepath.Join("local", "BUILD.bazel"), "local", []byte(localContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var jLang *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			jLang = jl
+			break
+		}
+	}
+	if jLang == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+
+	localRule := localFile.Rules[0]
+	setPackagesPrivateAttr(localRule)
+	localLabel := label.New("", "local", "local_helper")
+	jLang.classExportCache[localLabel.String()] = classExportInfo{
+		classes:  []types.ClassName{types.NewClassName(javaPackage, "LocalHelper")},
+		testonly: false,
+	}
+	ix.AddRule(c, localRule, localFile)
+	ix.Finish()
+
+	importerContent := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "app",
+    srcs = ["App.java"],
+    visibility = ["//:__subpackages__"],
+)
+`
+	importerFile, err := rule.LoadData("BUILD.bazel", "", []byte(importerContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	importerRule := importerFile.Rules[0]
+	resolveInput := types.ResolveInput{
+		PackageNames:         sorted_set.NewSortedSetFn([]types.PackageName{types.NewPackageName("com.example.app")}, types.PackageNameLess),
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedClasses: sorted_set.NewSortedSetFn([]types.ClassName{
+			types.NewClassName(javaPackage, "Ints"),
+			types.NewClassName(javaPackage, "LocalHelper"),
+		}, types.ClassNameLess),
+		ExportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess),
+		ExportedClassNames:   sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess),
+		AnnotationProcessors: sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess),
+	}
+
+	mrslv.Resolver(importerRule, "").Resolve(c, ix, rc, importerRule, resolveInput, label.New("", "", "app"))
+
+	got := importerRule.AttrStrings("deps")
+	sort.Strings(got)
+	want := []string{"//local:local_helper", "@maven//:com_google_guava_guava"}
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestWorkspaceClassInOwnedPackage(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	rc := testRemoteCache(nil)
+
+	javaPackage := types.NewPackageName("com.squareup.common.uuid")
+	providerContent := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "uuid",
+    _packages = ["com.squareup.common.uuid"],
+)
+`
+	providerFile, err := rule.LoadData(filepath.Join("common", "BUILD.bazel"), "common", []byte(providerContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerRule := providerFile.Rules[0]
+	setPackagesPrivateAttr(providerRule)
+
+	var jLang *javaLang
+	for _, lang := range langs {
+		if jl, ok := lang.(*javaLang); ok {
+			jLang = jl
+			break
+		}
+	}
+	if jLang == nil {
+		t.Fatal("javaLang not found in langs")
+	}
+	providerLabel := label.New("", "common", "uuid")
+	jLang.classExportCache[providerLabel.String()] = classExportInfo{
+		classes:  []types.ClassName{types.NewClassName(javaPackage, "UuidV7Supplier")},
+		testonly: false,
+	}
+	ix.AddRule(c, providerRule, providerFile)
+	ix.Finish()
+
+	consumerContent := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "uuid_testing",
+    srcs = ["FakeUuidSupplier.java"],
+)
+`
+	consumerFile, err := rule.LoadData("BUILD.bazel", "", []byte(consumerContent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumerRule := consumerFile.Rules[0]
+	resolveInput := types.ResolveInput{
+		PackageNames:         sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess),
+		ImportedClasses: sorted_set.NewSortedSetFn([]types.ClassName{
+			types.NewClassName(javaPackage, "UuidV7Supplier"),
+		}, types.ClassNameLess),
+		ExportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess),
+		ExportedClassNames:   sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess),
+		AnnotationProcessors: sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess),
+	}
+
+	mrslv.Resolver(consumerRule, "").Resolve(c, ix, rc, consumerRule, resolveInput, label.New("", "", "uuid_testing"))
+
+	got := consumerRule.AttrStrings("deps")
+	want := []string{"//common:uuid"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
+func TestMavenClassInOwnedPackage(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	ix.Finish()
+	rc := testRemoteCache(nil)
+
+	javaPackage := types.NewPackageName("com.google.common.primitives")
+	content := `load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "app",
+    srcs = ["App.java"],
+    visibility = ["//:__subpackages__"],
+)
+`
+	f, err := rule.LoadData("BUILD.bazel", "", []byte(content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := f.Rules[0]
+	resolveInput := types.ResolveInput{
+		PackageNames:         sorted_set.NewSortedSetFn([]types.PackageName{javaPackage}, types.PackageNameLess),
+		ImportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess),
+		ImportedClasses: sorted_set.NewSortedSetFn([]types.ClassName{
+			types.NewClassName(javaPackage, "Ints"),
+		}, types.ClassNameLess),
+		ExportedPackageNames: sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess),
+		ExportedClassNames:   sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess),
+		AnnotationProcessors: sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess),
+	}
+
+	mrslv.Resolver(r, "").Resolve(c, ix, rc, r, resolveInput, label.New("", "", "app"))
+
+	got := r.AttrStrings("deps")
+	want := []string{"@maven//:com_google_guava_guava"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, want)
+	}
+}
+
 // TestRuleIsTestOnly covers `testonly = True` detection across the two shapes
 // Gazelle has used to store the attribute: older Gazelle emitted
 // `*bzl.LiteralExpr{Token: "True"}` for `SetAttr("testonly", true)`; current
