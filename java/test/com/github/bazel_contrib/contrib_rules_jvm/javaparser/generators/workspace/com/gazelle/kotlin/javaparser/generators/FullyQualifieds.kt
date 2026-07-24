@@ -17,8 +17,22 @@ class FullyQualifieds {
 
     java.util.ArrayList<String>().map { y -> y.toString() }
 
+    okio.Buffer()
+
+    val localReceiver = this
+    localReceiver.Buffer()
+
+    listOf(this).map { "${it.Buffer}" }
+
+    doReturn(spyGrpcCall).`when`(transactionwriterServiceClient).ProcessPaymentPlanEligibilityEvent()
+    verify(transactionwriterServiceClient, org.mockito.Mockito.never()).ProcessPaymentPlanEligibilityEvent()
+
     this.BLAH = "beep"
     this.BEEP_BOOP = "baz"
+  }
+
+  fun localReceiver(parameterReceiver: Any) {
+    parameterReceiver.Buffer()
   }
 
   private fun privateFn(privateArg: com.example.PrivateArg): String {

@@ -6,5 +6,20 @@ class CallChainReceivers {
     // whose text contains a `.` but is not a fully-qualified identifier (parens).
     // Must not be recorded as a class reference.
     Value.foo(1).Bar()
+
+    // Constructor call through a single-segment package: must be recorded.
+    val buffer = okio.Buffer()
+
+    // A local value used as receiver of a class-like selector is not a package.
+    val localReceiver = Value
+    localReceiver.Buffer()
+  }
+
+  fun withParameter(parameterReceiver: Value) {
+    parameterReceiver.Buffer()
+  }
+
+  fun withLambda(values: List<Value>) {
+    values.forEach { it.Buffer() }
   }
 }
