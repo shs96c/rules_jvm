@@ -286,6 +286,8 @@ func (jr *Resolver) populateAssociatesAttr(c *config.Config, ix *resolve.RuleInd
 	}
 
 	associates := sorted_set.NewSortedSetFn([]label.Label{}, sorted_set.LabelLess)
+	moduleIdentities := make(map[string]struct{})
+	configs := c.Exts[languageName].(javaconfig.Configs)
 	for _, pkg := range resolveInput.PackageNames.SortedSlice() {
 		mainSpec := resolve.ImportSpec{Lang: languageName, Imp: types.NewResolvableJavaPackage(pkg, false, false).String()}
 		matches := ix.FindRulesByImportWithConfig(c, mainSpec, languageName)
@@ -306,8 +308,25 @@ func (jr *Resolver) populateAssociatesAttr(c *config.Config, ix *resolve.RuleInd
 			continue
 		}
 		associates.Add(simplifyLabel(c.RepoName, mainLabel, from))
+		moduleIdentities[kotlinModuleIdentity(configs, mainLabel)] = struct{}{}
 	}
 	if associates.Len() == 0 {
+		return
+	}
+	if len(moduleIdentities) > 1 {
+		// A Kotlin target may only associate one logical module. Keep every candidate
+		// as an ordinary dependency instead of emitting an analysis-invalid friend list.
+		deps := sorted_set.NewSortedSetFn([]label.Label{}, sorted_set.LabelLess)
+		for _, raw := range r.AttrStrings("deps") {
+			parsed, err := label.Parse(raw)
+			if err != nil {
+				panic(fmt.Sprintf("error converting Kotlin deps %q to label: %v", raw, err))
+			}
+			deps.Add(simplifyLabel(c.RepoName, normalizeLabelPreference(parsed, c.RepoName, from), from))
+		}
+		deps.AddAll(associates)
+		setManagedLabelAttr(r, "deps", deps)
+		r.DelAttr("associates")
 		return
 	}
 
