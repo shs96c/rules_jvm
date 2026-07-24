@@ -552,14 +552,23 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				packageNames.Add(tf.pkg)
 			}
 
-			suiteName := cfg.MapTestSuiteName(filepath.Base(args.Rel), aggregateAtRoot)
-
 			srcs := make([]string, 0, allTestRelatedSrcs.Len())
+			concreteTestTargetNames := make(map[string]struct{}, testJavaFiles.Len())
 			for _, src := range allTestRelatedSrcs.SortedSlice() {
 				if _, ok := separateTestJavaFiles[src]; !ok {
-					srcs = append(srcs, strings.TrimPrefix(filepath.ToSlash(src.pathRelativeToBazelWorkspaceRoot), args.Rel+"/"))
+					relativeSrc := strings.TrimPrefix(filepath.ToSlash(src.pathRelativeToBazelWorkspaceRoot), args.Rel+"/")
+					srcs = append(srcs, relativeSrc)
+					if testJavaFiles.Contains(src) {
+						concreteTestTargetNames[testTargetNameFromSource(relativeSrc)] = struct{}{}
+					}
 				}
 			}
+			for src := range separateTestJavaFiles {
+				concreteTestTargetNames[javaTestTargetName(src, aggregateAtRoot)] = struct{}{}
+			}
+
+			dirname := filepath.Base(args.Rel)
+			suiteName := collisionFreeTestSuiteName(cfg, dirname, aggregateAtRoot, concreteTestTargetNames)
 			sort.Strings(srcs)
 			if len(srcs) > 0 {
 				l.generateJavaTestSuite(
@@ -1425,12 +1434,7 @@ func (l javaLang) generateJavaBinary(file *rule.File, m types.ClassName, libName
 func (l javaLang) generateJavaTest(file *rule.File, pathToPackageRelativeToBazelWorkspace string, mavenRepositoryName string, f javaFile, includePackageInName bool, imports *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], annotationProcessorClasses *sorted_set.SortedSet[types.ClassName], depOnTestHelpers *string, wrapper string, extraAttributes map[string]bzl.Expr, res *language.GenerateResult) {
 	className := f.ClassName()
 	fullyQualifiedTestClass := className.FullyQualifiedClassName()
-	var testName string
-	if includePackageInName {
-		testName = strings.ReplaceAll(fullyQualifiedTestClass, ".", "_")
-	} else {
-		testName = className.BareOuterClassName()
-	}
+	testName := javaTestTargetName(f, includePackageInName)
 
 	javaRuleKind := "java_test"
 	if importsJunit5(imports) {
@@ -1670,6 +1674,41 @@ func labelsToStrings(labels []label.Label) []string {
 
 func testHelperLibname(targetName string) string {
 	return targetName + "-test-lib"
+}
+
+func javaTestTargetName(f javaFile, includePackageInName bool) string {
+	className := f.ClassName()
+	if includePackageInName {
+		return strings.ReplaceAll(className.FullyQualifiedClassName(), ".", "_")
+	}
+	return className.BareOuterClassName()
+}
+
+func testTargetNameFromSource(src string) string {
+	extension := filepath.Ext(src)
+	return strings.TrimSuffix(src, extension)
+}
+
+func collisionFreeTestSuiteName(cfg *javaconfig.Config, dirname string, aggregateAtRoot bool, concreteTestTargetNames map[string]struct{}) string {
+	suiteName := cfg.MapTestSuiteName(dirname, aggregateAtRoot)
+	if _, collides := concreteTestTargetNames[suiteName]; !collides {
+		return suiteName
+	}
+
+	// Reuse module mode's default "{dirname}-tests" disambiguation. A custom
+	// convention can still map both modes to the colliding name, so fall back to
+	// that spelling explicitly and keep extending it only in the pathological
+	// case where a test source already owns the fallback target too.
+	suiteName = cfg.MapTestSuiteName(dirname, true)
+	if suiteName == cfg.MapTestSuiteName(dirname, aggregateAtRoot) {
+		suiteName = dirname + "-tests"
+	}
+	for {
+		if _, collides := concreteTestTargetNames[suiteName]; !collides {
+			return suiteName
+		}
+		suiteName += "-tests"
+	}
 }
 
 func ptr[T any](v T) *T {
