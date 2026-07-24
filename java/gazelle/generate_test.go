@@ -7,6 +7,7 @@ import (
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
+	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java_export_index"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_multiset"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/sorted_set"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/types"
@@ -249,7 +250,7 @@ func TestNestedMainInTestHelperProducesDeletionStub(t *testing.T) {
 	}}, javaFileLess)
 	result := language.GenerateResult{}
 
-	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testSources, &result, javaconfig.New("."))
+	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testSources, nil, &result, javaconfig.New("."))
 
 	require.Empty(t, result.Gen)
 	require.Len(t, result.Empty, 1)
@@ -267,7 +268,7 @@ func TestTopLevelKotlinMainInTestHelperProducesDeletionStub(t *testing.T) {
 	}}, javaFileLess)
 	result := language.GenerateResult{}
 
-	javaLang{}.processJavaBinary(&rule.File{}, "src/test/kotlin/com/example", allMains, testSources, &result, javaconfig.New("."))
+	javaLang{}.processJavaBinary(&rule.File{}, "src/test/kotlin/com/example", allMains, testSources, nil, &result, javaconfig.New("."))
 
 	require.Empty(t, result.Gen)
 	require.Len(t, result.Empty, 1)
@@ -286,7 +287,7 @@ func TestNestedMainInTestSourceUsesProductionClassNameShape(t *testing.T) {
 	}}, javaFileLess)
 	result := language.GenerateResult{}
 
-	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testFiles, &result, javaconfig.New("."))
+	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testFiles, nil, &result, javaconfig.New("."))
 
 	require.Empty(t, result.Gen)
 	require.Len(t, result.Empty, 1)
@@ -305,7 +306,7 @@ func TestSuiteOwnedMainCleanupRunsWhenBinaryGenerationDisabled(t *testing.T) {
 	cfg.SetGenerateBinary(false)
 	result := language.GenerateResult{}
 
-	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testSources, &result, cfg)
+	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testSources, nil, &result, cfg)
 
 	require.Empty(t, result.Gen)
 	require.Len(t, result.Empty, 1)
@@ -326,7 +327,7 @@ func TestSuiteOwnedMainDeletionPreservesCustomNamedBinary(t *testing.T) {
 	intentional.Insert(file)
 	result := language.GenerateResult{}
 
-	javaLang{}.processJavaBinary(file, "src/test/java/com/example", allMains, testSources, &result, javaconfig.New("."))
+	javaLang{}.processJavaBinary(file, "src/test/java/com/example", allMains, testSources, nil, &result, javaconfig.New("."))
 
 	require.Len(t, result.Empty, 1)
 	require.Equal(t, "TestApp", result.Empty[0].Name())
@@ -351,7 +352,7 @@ func TestSuiteOwnedMainDeletionPreservesKeptDefaultBinary(t *testing.T) {
 	require.NoError(t, err)
 	result := language.GenerateResult{}
 
-	javaLang{}.processJavaBinary(file, "src/test/kotlin/com/example/scenarios", allMains, testSources, &result, javaconfig.New("."))
+	javaLang{}.processJavaBinary(file, "src/test/kotlin/com/example/scenarios", allMains, testSources, nil, &result, javaconfig.New("."))
 
 	require.Empty(t, result.Gen)
 	require.Empty(t, result.Empty)
@@ -363,13 +364,92 @@ func TestProductionMainStillGeneratesBinary(t *testing.T) {
 	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
 	result := language.GenerateResult{}
 
-	javaLang{}.processJavaBinary(&rule.File{}, "src/main/java/com/example", allMains, nil, &result, javaconfig.New("."))
+	javaLang{}.processJavaBinary(&rule.File{}, "src/main/java/com/example", allMains, nil, nil, &result, javaconfig.New("."))
 
 	require.Empty(t, result.Empty)
 	require.Len(t, result.Gen, 1)
 	require.Equal(t, "App", result.Gen[0].Name())
 	require.Equal(t, "com.example.App", result.Gen[0].AttrString("main_class"))
 	require.Equal(t, []string{":example"}, result.Gen[0].AttrStrings("runtime_deps"))
+}
+
+func TestSccProductionMainsDependOnOwningGroup(t *testing.T) {
+	const moduleRoot = "src/main/java"
+	alphaPackage := types.NewPackageName("com.example.alpha")
+	betaPackage := types.NewPackageName("com.example.beta")
+	alphaMain := types.NewClassName(alphaPackage, "AlphaApp")
+	betaMain := types.NewClassName(betaPackage, "BetaApp")
+	packageWithMain := func(pkg types.PackageName, main types.ClassName, filename string) *java.Package {
+		return &java.Package{
+			Name:            pkg,
+			DeclaredClasses: sorted_set.NewSortedSetFn([]types.ClassName{main}, types.ClassNameLess),
+			Files:           sorted_set.NewSortedSet([]string{filename}),
+			Mains:           sorted_set.NewSortedSetFn([]types.ClassName{main}, types.ClassNameLess),
+		}
+	}
+
+	c, langs, _ := testConfig(t)
+	rootConfig := javaconfig.New(c.RepoRoot)
+	require.NoError(t, rootConfig.SetModuleGranularity("scc"))
+	configs := c.Exts[languageName].(javaconfig.Configs)
+	configs[moduleRoot] = rootConfig
+	for _, rel := range []string{
+		moduleRoot + "/com",
+		moduleRoot + "/com/example",
+		moduleRoot + "/com/example/alpha",
+		moduleRoot + "/com/example/beta",
+	} {
+		configs[rel] = rootConfig.NewChild()
+	}
+
+	l := langs[1].(*javaLang)
+	l.javaPackageCache = map[string]*java.Package{
+		moduleRoot + "/com/example/alpha": packageWithMain(alphaPackage, alphaMain, "AlphaApp.java"),
+		moduleRoot + "/com/example/beta":  packageWithMain(betaPackage, betaMain, "BetaApp.java"),
+	}
+
+	file, err := rule.LoadData(moduleRoot+"/BUILD.bazel", moduleRoot, []byte(`java_binary(
+    name = "AlphaApp",
+    main_class = "com.example.alpha.AlphaApp",
+    runtime_deps = [
+        ":java",
+        ":kept_runtime",  # keep
+        "//runtime:reviewed",
+    ],
+)
+`))
+	require.NoError(t, err)
+	args := language.GenerateArgs{Config: c, File: file, Rel: moduleRoot}
+	result := language.GenerateResult{}
+	mainLibraryNames := l.emitModuleProductionLibraries(
+		args,
+		rootConfig,
+		sorted_set.NewSortedSet([]string{}),
+		"",
+		"",
+		&result,
+		l.logger,
+	)
+	allMains := sorted_set.NewSortedSetFn(
+		[]types.ClassName{alphaMain, betaMain},
+		types.ClassNameLess,
+	)
+	l.processJavaBinary(file, moduleRoot, allMains, nil, mainLibraryNames, &result, rootConfig)
+
+	require.Equal(t, map[string]string{
+		"com.example.alpha.AlphaApp": "alpha",
+		"com.example.beta.BetaApp":   "beta",
+	}, mainLibraryNames)
+	generated := make(map[string]*rule.Rule)
+	for _, generatedRule := range result.Gen {
+		generated[generatedRule.Name()] = generatedRule
+	}
+	require.Contains(t, generated, "AlphaApp")
+	require.Contains(t, generated, "BetaApp")
+	require.ElementsMatch(t, []string{":alpha", ":kept_runtime", "//runtime:reviewed"}, generated["AlphaApp"].AttrStrings("runtime_deps"))
+	require.Equal(t, []string{":beta"}, generated["BetaApp"].AttrStrings("runtime_deps"))
+	require.NotContains(t, generated["AlphaApp"].AttrStrings("runtime_deps"), ":java")
+	require.NotContains(t, generated["BetaApp"].AttrStrings("runtime_deps"), ":java")
 }
 
 func TestSuite(t *testing.T) {
@@ -799,7 +879,11 @@ func TestIsOwnedByModuleRoot(t *testing.T) {
 func newTestJavaLang(t *testing.T) javaLang {
 	t.Helper()
 	return javaLang{
-		logger: zerolog.New(zerolog.NewTestWriter(t)),
+		logger:           zerolog.New(zerolog.NewTestWriter(t)),
+		javaPackageCache: make(map[string]*java.Package),
+		javaExportIndex:  java_export_index.NewJavaExportIndex(languageName, zerolog.New(zerolog.NewTestWriter(t))),
+		classExportCache: make(map[string]classExportInfo),
+		kotlinLibraries:  make(map[string]bool),
 	}
 }
 
