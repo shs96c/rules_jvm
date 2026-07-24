@@ -240,6 +240,139 @@ func TestAnnotationProcessorExtraImportsAddsProductionImports(t *testing.T) {
 	require.Empty(t, testJavaImportedClasses.SortedSlice())
 }
 
+func TestNestedMainInTestHelperProducesDeletionStub(t *testing.T) {
+	pkg := types.NewPackageName("com.example")
+	mainClass := types.NewClassName(pkg, "PaymentsFeatureFlagTestRunner.PaymentsFeatureFlagApp")
+	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
+	testSources := sorted_set.NewSortedSetFn([]javaFile{{
+		pathRelativeToBazelWorkspaceRoot: "src/test/java/com/example/PaymentsFeatureFlagTestRunner.java",
+		pkg:                              pkg,
+	}}, javaFileLess)
+	result := language.GenerateResult{}
+
+	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testSources, &result, javaconfig.New("."))
+
+	require.Empty(t, result.Gen)
+	require.Len(t, result.Empty, 1)
+	require.Equal(t, "java_binary", result.Empty[0].Kind())
+	require.Equal(t, "PaymentsFeatureFlagTestRunner.PaymentsFeatureFlagApp", result.Empty[0].Name())
+}
+
+func TestTopLevelKotlinMainInTestHelperProducesDeletionStub(t *testing.T) {
+	pkg := types.NewPackageName("com.example")
+	mainClass := types.NewClassName(pkg, "GenerateRecoveryReplayFixturesKt")
+	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
+	testSources := sorted_set.NewSortedSetFn([]javaFile{{
+		pathRelativeToBazelWorkspaceRoot: "src/test/kotlin/com/example/GenerateRecoveryReplayFixtures.kt",
+		pkg:                              pkg,
+	}}, javaFileLess)
+	result := language.GenerateResult{}
+
+	javaLang{}.processJavaBinary(&rule.File{}, "src/test/kotlin/com/example", allMains, testSources, &result, javaconfig.New("."))
+
+	require.Empty(t, result.Gen)
+	require.Len(t, result.Empty, 1)
+	require.Equal(t, "GenerateRecoveryReplayFixturesKt", result.Empty[0].Name())
+}
+
+func TestNestedMainInTestSourceUsesProductionClassNameShape(t *testing.T) {
+	pkg := types.NewPackageName("com.example")
+	// The parser returns a package-relative "Outer.Inner" string which the Go
+	// adapter passes to NewClassName, rather than ParseClassName.
+	mainClass := types.NewClassName(pkg, "FooTest.App")
+	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
+	testFiles := sorted_set.NewSortedSetFn([]javaFile{{
+		pathRelativeToBazelWorkspaceRoot: "src/test/java/com/example/FooTest.java",
+		pkg:                              pkg,
+	}}, javaFileLess)
+	result := language.GenerateResult{}
+
+	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testFiles, &result, javaconfig.New("."))
+
+	require.Empty(t, result.Gen)
+	require.Len(t, result.Empty, 1)
+	require.Equal(t, "FooTest.App", result.Empty[0].Name())
+}
+
+func TestSuiteOwnedMainCleanupRunsWhenBinaryGenerationDisabled(t *testing.T) {
+	pkg := types.NewPackageName("com.example")
+	mainClass := types.NewClassName(pkg, "TestApp")
+	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
+	testSources := sorted_set.NewSortedSetFn([]javaFile{{
+		pathRelativeToBazelWorkspaceRoot: "src/test/java/com/example/TestApp.java",
+		pkg:                              pkg,
+	}}, javaFileLess)
+	cfg := javaconfig.New(".")
+	cfg.SetGenerateBinary(false)
+	result := language.GenerateResult{}
+
+	javaLang{}.processJavaBinary(&rule.File{}, "src/test/java/com/example", allMains, testSources, &result, cfg)
+
+	require.Empty(t, result.Gen)
+	require.Len(t, result.Empty, 1)
+	require.Equal(t, "TestApp", result.Empty[0].Name())
+}
+
+func TestSuiteOwnedMainDeletionPreservesCustomNamedBinary(t *testing.T) {
+	pkg := types.NewPackageName("com.example")
+	mainClass := types.NewClassName(pkg, "TestApp")
+	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
+	testSources := sorted_set.NewSortedSetFn([]javaFile{{
+		pathRelativeToBazelWorkspaceRoot: "src/test/java/com/example/TestApp.java",
+		pkg:                              pkg,
+	}}, javaFileLess)
+	file := rule.EmptyFile("BUILD", "src/test/java/com/example")
+	intentional := rule.NewRule("java_binary", "custom_test_app")
+	intentional.SetAttr("main_class", "com.example.TestApp")
+	intentional.Insert(file)
+	result := language.GenerateResult{}
+
+	javaLang{}.processJavaBinary(file, "src/test/java/com/example", allMains, testSources, &result, javaconfig.New("."))
+
+	require.Len(t, result.Empty, 1)
+	require.Equal(t, "TestApp", result.Empty[0].Name())
+	require.NotEqual(t, intentional.Name(), result.Empty[0].Name())
+	require.Equal(t, "custom_test_app", file.Rules[0].Name())
+}
+
+func TestSuiteOwnedMainDeletionPreservesKeptDefaultBinary(t *testing.T) {
+	pkg := types.NewPackageName("com.example.scenarios")
+	mainClass := types.NewClassName(pkg, "ScenarioFixtureUnarchiverKt")
+	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
+	testSources := sorted_set.NewSortedSetFn([]javaFile{{
+		pathRelativeToBazelWorkspaceRoot: "src/test/kotlin/com/example/scenarios/ScenarioFixtureUnarchiver.kt",
+		pkg:                              pkg,
+	}}, javaFileLess)
+	file, err := rule.LoadData("BUILD.bazel", "src/test/kotlin/com/example/scenarios", []byte(`java_binary(
+    name = "ScenarioFixtureUnarchiverKt",
+    main_class = "com.example.scenarios.ScenarioFixtureUnarchiverKt",
+    runtime_deps = [":scenario-fixtures"],  # keep
+)
+`))
+	require.NoError(t, err)
+	result := language.GenerateResult{}
+
+	javaLang{}.processJavaBinary(file, "src/test/kotlin/com/example/scenarios", allMains, testSources, &result, javaconfig.New("."))
+
+	require.Empty(t, result.Gen)
+	require.Empty(t, result.Empty)
+}
+
+func TestProductionMainStillGeneratesBinary(t *testing.T) {
+	pkg := types.NewPackageName("com.example")
+	mainClass := types.NewClassName(pkg, "App")
+	allMains := sorted_set.NewSortedSetFn([]types.ClassName{mainClass}, types.ClassNameLess)
+	result := language.GenerateResult{}
+
+	javaLang{}.processJavaBinary(&rule.File{}, "src/main/java/com/example", allMains, nil, &result, javaconfig.New("."))
+
+	require.Empty(t, result.Empty)
+	require.Len(t, result.Gen, 1)
+	require.Equal(t, "App", result.Gen[0].Name())
+	require.Equal(t, "com.example.App", result.Gen[0].AttrString("main_class"))
+	require.Equal(t, []string{":example"}, result.Gen[0].AttrStrings("runtime_deps"))
+}
+
 func TestSuite(t *testing.T) {
 	src := "FooTest.java"
 	pkg := "com.example"
@@ -401,9 +534,9 @@ func TestAddNonLocalImports(t *testing.T) {
 		"com.example.a.b.Baz",        // same pkg, not included class name: keep
 		"com.example.a.b.Baz.SubBaz", // same pkg, nested class, not included class name: keep
 		"com.example.a.b.lspe_config.Builder",
-		"com.example.a.b.c.Foo",      // different pkg: keep
-		"com.example.a.Foo",          // different pkg: keep
-		"com.another.a.b.Foo",        // different pkg: keep
+		"com.example.a.b.c.Foo", // different pkg: keep
+		"com.example.a.Foo",     // different pkg: keep
+		"com.another.a.b.Foo",   // different pkg: keep
 	} {
 		name, err := types.ParseClassName(s)
 		if err != nil {

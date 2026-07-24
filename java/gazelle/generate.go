@@ -494,9 +494,9 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		}
 	}
 
-	if cfg.GenerateBinary() {
-		l.processJavaBinary(args.File, args.Rel, allMains, testHelperJavaFiles, &res, cfg)
-	}
+	allTestRelatedSrcs := testJavaFiles.Clone()
+	allTestRelatedSrcs.AddAll(testHelperJavaFiles)
+	l.processJavaBinary(args.File, args.Rel, allMains, allTestRelatedSrcs, &res, cfg)
 
 	// We add special packages to point to testonly libraries which - this accumulates them,
 	// as well as the existing java imports of tests.
@@ -537,9 +537,6 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 			})
 		}
 	}
-
-	allTestRelatedSrcs := testJavaFiles.Clone()
-	allTestRelatedSrcs.AddAll(testHelperJavaFiles)
 
 	if allTestRelatedSrcs.Len() > 0 {
 		switch cfg.TestMode() {
@@ -842,10 +839,10 @@ func generateProtoLibraries(l *javaLang, args language.GenerateArgs, log zerolog
 }
 
 type protoJavaLayout struct {
-	multipleFiles     bool
-	genericServices   bool
-	topLevelMessages  []string
-	topLevelEnums     []string
+	multipleFiles    bool
+	genericServices  bool
+	topLevelMessages []string
+	topLevelEnums    []string
 }
 
 func generatedProtoClasses(
@@ -1080,6 +1077,7 @@ func filterImportsInModule(packages *sorted_set.SortedSet[types.PackageName], cl
 		return !modulePackages.Contains(p)
 	}), classes
 }
+
 // filterNamespaceClassesInModule removes parser-produced classes that are
 // actually owned package namespaces or locally declared classes. Declaration
 // matching keeps undeclared external split-package classes visible.
@@ -1349,23 +1347,131 @@ func (l javaLang) generateJavaLibrary(args generateJavaLibraryArgs) {
 	}
 }
 
-func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorted_set.SortedSet[types.ClassName], testHelperJavaFiles *sorted_set.SortedSet[javaFile], res *language.GenerateResult, cfg *javaconfig.Config) {
-	var testHelperJavaClasses *sorted_set.SortedSet[types.ClassName]
-	for _, m := range allMains.SortedSlice() {
-		// Lazily populate because java_binaries are pretty rare
-		if testHelperJavaClasses == nil {
-			testHelperJavaClasses = sorted_set.NewSortedSetFn[types.ClassName]([]types.ClassName{}, types.ClassNameLess)
-			for _, testHelperJavaFile := range testHelperJavaFiles.SortedSlice() {
-				testHelperJavaClasses.Add(*testHelperJavaFile.ClassName())
+func indexJavaFileClasses(javaFiles *sorted_set.SortedSet[javaFile]) map[string]struct{} {
+	classes := make(map[string]struct{})
+	if javaFiles == nil {
+		return classes
+	}
+	for _, javaFile := range javaFiles.SortedSlice() {
+		class := javaFile.ClassName().FullyQualifiedClassName()
+		classes[class] = struct{}{}
+		if strings.HasSuffix(javaFile.pathRelativeToBazelWorkspaceRoot, ".kt") {
+			classes[class+"Kt"] = struct{}{}
+		}
+	}
+	return classes
+}
+
+// javaFileClassesOwnMain reports whether main is compiled from one of the indexed
+// source files. Parser mains are package-relative strings passed to NewClassName,
+// so a nested main may be stored as the apparent outer name "Outer.Inner" rather
+// than ClassName.innerClassNames. Walk dotted prefixes down to the source owner
+// instead of relying on FullyQualifiedOuterClassName to normalize that shape.
+func javaFileClassesOwnMain(classes map[string]struct{}, main types.ClassName) bool {
+	candidate := main.FullyQualifiedClassName()
+	packageName := main.PackageName().Name
+	for {
+		if _, ok := classes[candidate]; ok {
+			return true
+		}
+		lastDot := strings.LastIndex(candidate, ".")
+		if lastDot < 0 || (packageName != "" && lastDot <= len(packageName)) {
+			return false
+		}
+		candidate = candidate[:lastDot]
+	}
+}
+
+func existingRuleHasKeep(r *rule.Rule) bool {
+	if r == nil {
+		return false
+	}
+	if r.ShouldKeep() {
+		return true
+	}
+	for _, attrName := range r.AttrKeys() {
+		if commentsHaveKeep(r.AttrComments(attrName)) {
+			return true
+		}
+		if exprHasKeep(r.Attr(attrName)) {
+			return true
+		}
+	}
+	return false
+}
+
+func commentsHaveKeep(comments *bzl.Comments) bool {
+	if comments == nil {
+		return false
+	}
+	for _, comment := range append(comments.Before, comments.Suffix...) {
+		text := strings.TrimSpace(strings.TrimPrefix(comment.Token, "#"))
+		if text == "keep" || strings.HasPrefix(text, "keep: ") {
+			return true
+		}
+	}
+	return false
+}
+
+func exprHasKeep(expr bzl.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	if rule.ShouldKeep(expr) {
+		return true
+	}
+	switch expr := expr.(type) {
+	case *bzl.AssignExpr:
+		return exprHasKeep(expr.RHS)
+	case *bzl.ListExpr:
+		for _, item := range expr.List {
+			if exprHasKeep(item) {
+				return true
 			}
 		}
-		isTestOnly := false
-		libName := cfg.MapLibraryName(filepath.Base(rel))
-		if testHelperJavaClasses.Contains(m) {
-			isTestOnly = true
-			libName = testHelperLibname(libName)
+	case *bzl.CallExpr:
+		for _, item := range expr.List {
+			if exprHasKeep(item) {
+				return true
+			}
 		}
-		l.generateJavaBinary(file, m, libName, isTestOnly, res)
+	}
+	return false
+}
+
+func existingRule(file *rule.File, kind, name string) *rule.Rule {
+	if file == nil {
+		return nil
+	}
+	for _, existing := range file.Rules {
+		if existing.Kind() == kind && existing.Name() == name {
+			return existing
+		}
+	}
+	return nil
+}
+
+func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorted_set.SortedSet[types.ClassName], testOwnedJavaFiles *sorted_set.SortedSet[javaFile], res *language.GenerateResult, cfg *javaconfig.Config) {
+	var testOwnedJavaClasses map[string]struct{}
+	for _, m := range allMains.SortedSlice() {
+		// Lazily populate because java_binaries are pretty rare
+		if testOwnedJavaClasses == nil {
+			testOwnedJavaClasses = indexJavaFileClasses(testOwnedJavaFiles)
+		}
+		if javaFileClassesOwnMain(testOwnedJavaClasses, m) {
+			if existingRuleHasKeep(existingRule(file, "java_binary", m.BareOuterClassName())) {
+				continue
+			}
+			// Gazelle only removes an obsolete existing rule when the generator emits
+			// an Empty stub. Match the default generated name so custom-named,
+			// intentionally hand-owned binaries for the same main remain untouched.
+			res.Empty = append(res.Empty, rule.NewRule("java_binary", m.BareOuterClassName()))
+			continue
+		}
+		if !cfg.GenerateBinary() {
+			continue
+		}
+		l.generateJavaBinary(file, m, cfg.MapLibraryName(filepath.Base(rel)), false, res)
 	}
 }
 
