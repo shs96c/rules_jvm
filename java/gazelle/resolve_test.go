@@ -1918,9 +1918,21 @@ kt_jvm_library(
 
 func TestJavaTestSuiteManagesResolvedPackageAssociate(t *testing.T) {
 	c, langs, _ := testConfig(t)
+	c.RepoName = "java"
+	c.KindMap = map[string]config.MappedKind{
+		"kt_jvm_library": {
+			FromKind: "kt_jvm_library",
+			KindName: "custom_kotlin_library",
+		},
+		"java_test_suite": {
+			FromKind: "java_test_suite",
+			KindName: "custom_test_suite",
+		},
+	}
 	mrslv, exts := InitTestResolversAndExtensions(langs)
 	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
 	jLang := langs[1].(*javaLang)
+	mrslv["custom_kotlin_library"] = jLang
 	kinds := jLang.Kinds()
 
 	if !kinds["java_test_suite"].ResolveAttrs["associates"] {
@@ -1937,7 +1949,7 @@ func TestJavaTestSuiteManagesResolvedPackageAssociate(t *testing.T) {
 	productionFile, err := rule.LoadData(
 		filepath.Join(productionPkg, "BUILD.bazel"),
 		productionPkg,
-		[]byte(`kt_jvm_library(
+		[]byte(`custom_kotlin_library(
     name = "example",
     srcs = ["Main.kt"],
     _packages = ["com.example"],
@@ -1953,27 +1965,34 @@ func TestJavaTestSuiteManagesResolvedPackageAssociate(t *testing.T) {
 	ix.AddRule(c, productionRule, productionFile)
 	ix.Finish()
 
-	generated := rule.NewRule("java_test_suite", "example")
+	generated := rule.NewRule("custom_test_suite", "example")
 	generated.SetAttr("srcs", []string{"ExampleTest.kt"})
-	generated.SetAttr("deps", []string{productionLabel.String(), ":unrelated"})
+	packageNames := sorted_set.NewSortedSetFn(
+		[]types.PackageName{javaPackage},
+		types.PackageNameLess,
+	)
+	emptyPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	emptyClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 	resolveInput := types.ResolveInput{
-		PackageNames: sorted_set.NewSortedSetFn(
-			[]types.PackageName{javaPackage},
-			types.PackageNameLess,
-		),
+		PackageNames:         packageNames,
+		ImportedPackageNames: packageNames.Clone(),
+		ImportedClasses:      emptyClasses,
+		ExportedPackageNames: emptyPackages,
+		ExportedClassNames:   emptyClasses,
+		AnnotationProcessors: emptyClasses,
 	}
-	from := label.New("", "src/test/kotlin/com/example", "example")
-	jLang.Resolver.(*Resolver).populateAssociatesAttr(c, ix, resolveInput, generated, true, from)
+	from := label.New("java", "", "example")
+	jLang.Resolver.(*Resolver).Resolve(c, ix, testRemoteCache(nil), generated, resolveInput, from)
 
 	wantAssociate := simplifyLabel(c.RepoName, productionLabel, from).String()
 	if got := generated.AttrStrings("associates"); !reflect.DeepEqual(got, []string{wantAssociate}) {
 		t.Fatalf("generated associates mismatch:\n got: %v\nwant: %v", got, []string{wantAssociate})
 	}
-	if got := generated.AttrStrings("deps"); !reflect.DeepEqual(got, []string{":unrelated"}) {
-		t.Fatalf("generated deps mismatch:\n got: %v\nwant: %v", got, []string{":unrelated"})
+	if got := generated.AttrStrings("deps"); len(got) != 0 {
+		t.Fatalf("generated deps = %v, want the associate removed", got)
 	}
 
-	existingFile, err := rule.LoadData("BUILD.bazel", from.Pkg, []byte(`java_test_suite(
+	existingFile, err := rule.LoadData("BUILD.bazel", from.Pkg, []byte(`custom_test_suite(
     name = "example",
     srcs = ["ExampleTest.kt"],
     associates = ["//stale:main"],
@@ -1988,8 +2007,8 @@ func TestJavaTestSuiteManagesResolvedPackageAssociate(t *testing.T) {
 	if got := existing.AttrStrings("associates"); !reflect.DeepEqual(got, []string{wantAssociate}) {
 		t.Errorf("merged associates mismatch:\n got: %v\nwant: %v", got, []string{wantAssociate})
 	}
-	if got := existing.AttrStrings("deps"); !reflect.DeepEqual(got, []string{":unrelated"}) {
-		t.Errorf("merged deps mismatch:\n got: %v\nwant: %v", got, []string{":unrelated"})
+	if got := existing.AttrStrings("deps"); len(got) != 0 {
+		t.Errorf("merged deps = %v, want stale deps removed", got)
 	}
 }
 
