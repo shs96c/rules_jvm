@@ -1,0 +1,26 @@
+{
+  "version": "2",
+  "artifacts": {
+    "com.example:split-a": {
+      "shasums": {},
+      "version": "1.0"
+    },
+    "com.example:split-b": {
+      "shasums": {},
+      "version": "1.0"
+    },
+    "io.mockk:mockk-dsl-jvm": {
+      "shasums": {},
+      "version": "1.13.16"
+    },
+    "io.mockk:mockk-jvm": {
+      "shasums": {},
+      "version": "1.13.16"
+    }
+  },
+  "dependencies": {
+    "io.mockk:mockk-jvm": [
+      "io.mockk:mockk-dsl-jvm"
+    ]
+  }
+}
