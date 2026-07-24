@@ -3,8 +3,10 @@ package gazelle
 import (
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/private/java"
@@ -295,6 +297,11 @@ func findClassRuleWithOverride(c *config.Config, className types.ClassName) (lab
 	return resolve.FindRuleWithOverride(c, importSpec, languageName)
 }
 
+func findPackageRuleWithOverride(c *config.Config, packageName types.PackageName) (label.Label, bool) {
+	importSpec := resolve.ImportSpec{Lang: languageName, Imp: types.NewResolvableJavaPackage(packageName, false, false).String()}
+	return resolve.FindRuleWithOverride(c, importSpec, languageName)
+}
+
 func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rule.Rule, attrName string, requiredPackageNames *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], ix *resolve.RuleIndex, isTestRule bool, from label.Label, ownPackageNames *sorted_set.SortedSet[types.PackageName]) {
 	labels := sorted_set.NewSortedSetFn[label.Label]([]label.Label{}, sorted_set.LabelLess)
 
@@ -330,6 +337,13 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					hasClassOverrides = true
 					break
 				}
+			}
+		}
+
+		if !hasClassOverrides {
+			if ol, found := findPackageRuleWithOverride(c, imp); found {
+				labels.Add(simplifyLabel(c.RepoName, ol, from))
+				continue
 			}
 		}
 
@@ -375,17 +389,34 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 		// Try package-level resolution first (fast path)
 		dep, ambiguous := jr.resolveSinglePackageWithAmbiguity(c, pc, imp, ix, from, isTestRule, ownPackageNames, pkgClasses)
 		if dep != label.NoLabel {
-			labels.Add(simplifyLabel(c.RepoName, dep, from))
+			resolvedPackageDep := simplifyLabel(c.RepoName, dep, from)
+			if len(classesByPackage[imp]) == 0 {
+				labels.Add(resolvedPackageDep)
+				continue
+			}
 
 			// The package resolved unambiguously to a single target, but an external
-			// gazelle plugin (e.g. a proto/wire generator) may own some classes of the same
-			// package. Class import specs are never registered in the global index, so a
-			// class-level lookup always falls through to registered CrossResolvers. Only
-			// probe classes the resolved target doesn't already declare, to keep the fast
-			// path fast when there is no external provider.
+			// gazelle plugin or Maven artifact may own some classes of the same package.
+			// Resolve each imported class independently when the package target does not
+			// declare it. This keeps a workspace helper that owns one class from claiming
+			// every Maven class in the enclosing package.
 			for _, className := range classesByPackage[imp] {
 				if jr.ruleDeclaresClass(dep, className) {
+					labels.Add(resolvedPackageDep)
 					continue
+				}
+
+				l, err := jr.lang.mavenResolver.ResolveClass(className, pc.ExcludedArtifacts(), pc.MavenRepositoryName())
+				if err != nil {
+					jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+					l = label.NoLabel
+				}
+				if l != label.NoLabel {
+					if jr.shouldUseMavenClassLabel(c, l, dep, className, ix, isTestRule) {
+						labels.Add(simplifyLabel(c.RepoName, l, from))
+						continue
+					}
+					l = label.NoLabel
 				}
 				if l := jr.resolveClassFromCrossResolver(c, pc, className, ix, from); l != label.NoLabel {
 					labels.Add(l)
@@ -408,6 +439,21 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 						continue
 					}
 				}
+
+				if jr.ruleDeclaresAnyClassInPackage(dep, className.PackageName()) {
+					l, err = jr.resolveMavenWholePackageClass(pc, className)
+					if err != nil {
+						jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+					}
+					// The Maven claim here is package-level only. A lowercase symbol is a
+					// Kotlin top-level function reference, which class metadata cannot
+					// declare, so only class-cased symbols may leave the workspace owner.
+					if l != label.NoLabel && symbolLooksLikeClass(className) && jr.shouldUseMavenClassLabel(c, l, dep, className, ix, isTestRule) {
+						labels.Add(simplifyLabel(c.RepoName, l, from))
+						continue
+					}
+				}
+				labels.Add(resolvedPackageDep)
 			}
 			continue
 		}
@@ -467,17 +513,55 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 
 	// A class whose package this rule owns is normally assumed to be provided by the rule
 	// itself, so that package is filtered out of requiredPackageNames and the loop above
-	// never visits it. But an external gazelle plugin (e.g. notification-builder's Campaigns)
-	// can provide a class in a package the rule otherwise owns -- a split package. The
-	// generate step keeps such a class in importedClasses precisely because the rule does
-	// not declare it, so consult registered CrossResolvers for its real provider.
+	// never visits it. The generate step keeps undeclared classes in importedClasses so
+	// split-package owners from directives, Maven, or another Gazelle plugin can still be
+	// selected here.
 	if importedClasses != nil && ownPackageNames != nil {
 		for _, className := range importedClasses.SortedSlice() {
 			if !ownPackageNames.Contains(className.PackageName()) {
 				continue
 			}
+			// A class this rule itself declares (e.g. in a module sub-package) needs
+			// no dependency; even an explicit directive must not force a self-dep
+			// through a published copy of the workspace.
+			if jr.ruleDeclaresClass(from, className) {
+				continue
+			}
+			if l, found := findClassRuleWithOverride(c, className); found {
+				labels.Add(simplifyLabel(c.RepoName, l, from))
+				continue
+			}
+			if l := jr.resolveSingleClass(c, pc, className, ix, from, isTestRule); l != label.NoLabel {
+				labels.Add(simplifyLabel(c.RepoName, l, from))
+				continue
+			}
+
+			l, err := jr.lang.mavenResolver.ResolveClass(className, pc.ExcludedArtifacts(), pc.MavenRepositoryName())
+			if err != nil {
+				jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+				l = label.NoLabel
+			}
+			if l != label.NoLabel {
+				// A rule named after the artifact's directory (e.g. an SCC group for
+				// org/apache/avro) makes the raw name heuristic misread the real Maven
+				// owner as a published self-copy; gate on workspace declarations instead.
+				if jr.shouldUseMavenClassLabel(c, l, from, className, ix, isTestRule) {
+					labels.Add(simplifyLabel(c.RepoName, l, from))
+					continue
+				}
+				l = label.NoLabel
+			}
 			if l := jr.resolveClassFromCrossResolver(c, pc, className, ix, from); l != label.NoLabel {
 				labels.Add(l)
+				continue
+			}
+
+			l, err = jr.resolveMavenWholePackageClass(pc, className)
+			if err != nil {
+				jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
+			}
+			if l != label.NoLabel && jr.shouldUseMavenClassLabel(c, l, from, className, ix, isTestRule) {
+				labels.Add(simplifyLabel(c.RepoName, l, from))
 			}
 		}
 	}
@@ -529,6 +613,90 @@ func simplifyLabel(repoName string, l label.Label, from label.Label) label.Label
 		}
 	}
 	return l
+}
+
+func mavenLabelLooksLikeWorkspaceOwner(mavenLabel label.Label, owner label.Label) bool {
+	if mavenLabel.Repo != "maven" {
+		return false
+	}
+	ownerName := owner.Name
+	if ownerName == "" {
+		ownerName = path.Base(owner.Pkg)
+	}
+	if ownerName == "" {
+		return false
+	}
+	normalisedOwnerName := strings.ReplaceAll(ownerName, "-", "_")
+	if mavenLabel.Name == normalisedOwnerName || strings.HasSuffix(mavenLabel.Name, "_"+normalisedOwnerName) {
+		return true
+	}
+	for _, segment := range strings.Split(owner.Pkg, "/") {
+		normalisedSegment := strings.ReplaceAll(segment, "-", "_")
+		if normalisedSegment == "" {
+			continue
+		}
+		if mavenLabel.Name == normalisedSegment || strings.HasSuffix(mavenLabel.Name, "_"+normalisedSegment) {
+			return true
+		}
+	}
+	return sharedWorkspaceTokenCount(mavenLabel.Name, owner.Pkg) >= 2 && mavenLabelContainsOwnerLeaf(mavenLabel.Name, owner.Pkg)
+}
+
+func sharedWorkspaceTokenCount(mavenName, ownerPkg string) int {
+	mavenTokens := make(map[string]struct{})
+	for _, token := range strings.Split(mavenName, "_") {
+		if token == "" || isGenericWorkspaceToken(token) {
+			continue
+		}
+		mavenTokens[token] = struct{}{}
+	}
+	seen := make(map[string]struct{})
+	for _, segment := range strings.Split(ownerPkg, "/") {
+		token := strings.ReplaceAll(segment, "-", "_")
+		if token == "" || isGenericWorkspaceToken(token) {
+			continue
+		}
+		if _, ok := mavenTokens[token]; ok {
+			seen[token] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func mavenLabelContainsOwnerLeaf(mavenName, ownerPkg string) bool {
+	mavenTokens := make(map[string]struct{})
+	for _, token := range strings.Split(mavenName, "_") {
+		if token == "" || isGenericWorkspaceToken(token) {
+			continue
+		}
+		mavenTokens[token] = struct{}{}
+	}
+	segments := strings.Split(ownerPkg, "/")
+	for i := len(segments) - 1; i >= 0; i-- {
+		token := strings.ReplaceAll(segments[i], "-", "_")
+		if token == "" || isGenericWorkspaceToken(token) {
+			continue
+		}
+		_, ok := mavenTokens[token]
+		return ok
+	}
+	return false
+}
+
+// symbolLooksLikeClass reports whether an imported symbol follows the class
+// naming convention, mirroring ParseClassName's package/class split.
+func symbolLooksLikeClass(className types.ClassName) bool {
+	runes := []rune(className.BareOuterClassName())
+	return len(runes) > 0 && unicode.IsUpper(runes[0])
+}
+
+func isGenericWorkspaceToken(token string) bool {
+	switch token {
+	case "com", "org", "net", "java", "kotlin", "jvm", "main", "src", "test":
+		return true
+	default:
+		return false
+	}
 }
 
 // Note: This function may modify labels.
@@ -641,6 +809,9 @@ func (jr *Resolver) resolveSinglePackageWithAmbiguity(c *config.Config, pc *java
 			jr.lang.logger.Fatal().Err(err).Msg("maven resolver error")
 		}
 	} else {
+		if ownPackageNames != nil && ownPackageNames.Contains(imp) && mavenLabelLooksLikeWorkspaceOwner(l, from) {
+			return label.NoLabel, false
+		}
 		return l, false
 	}
 
@@ -847,6 +1018,44 @@ func (jr *Resolver) ruleDeclaresClass(lbl label.Label, className types.ClassName
 		}
 	}
 	return false
+}
+
+func (jr *Resolver) ruleDeclaresAnyClassInPackage(lbl label.Label, packageName types.PackageName) bool {
+	cacheLabel := label.New("", lbl.Pkg, lbl.Name)
+	info, ok := jr.lang.classExportCache[cacheLabel.String()]
+	if !ok {
+		return false
+	}
+	for _, cls := range info.classes {
+		if cls.PackageName() == packageName {
+			return true
+		}
+	}
+	return false
+}
+
+func (jr *Resolver) shouldUseMavenClassLabel(c *config.Config, mavenLabel label.Label, owner label.Label, className types.ClassName, ix *resolve.RuleIndex, isTestRule bool) bool {
+	if !mavenLabelLooksLikeWorkspaceOwner(mavenLabel, owner) {
+		return true
+	}
+
+	if jr.workspaceDeclaresClass(c, className, ix, isTestRule) {
+		return false
+	}
+	pci := jr.buildPackageClassIndex(c, className.PackageName(), ix)
+	return len(pci.prod) > 0 || (isTestRule && len(pci.test) > 0)
+}
+
+func (jr *Resolver) workspaceDeclaresClass(c *config.Config, className types.ClassName, ix *resolve.RuleIndex, isTestRule bool) bool {
+	return packageClassIndexDeclaresClass(jr.buildPackageClassIndex(c, className.PackageName(), ix), className, isTestRule)
+}
+
+func packageClassIndexDeclaresClass(pci *packageClassIndex, className types.ClassName, isTestRule bool) bool {
+	bareClassName := className.BareOuterClassName()
+	if len(pci.prod[bareClassName]) > 0 {
+		return true
+	}
+	return isTestRule && len(pci.test[bareClassName]) > 0
 }
 
 // resolveTestSuiteHelperClass returns the unique "<suite>-test-lib" helper library of a

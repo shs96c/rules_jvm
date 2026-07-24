@@ -1,0 +1,8 @@
+load("@rules_java//java:defs.bzl", "java_library")
+
+java_library(
+    name = "declared",
+    srcs = ["Declared.java"],
+    visibility = ["//:__subpackages__"],
+    deps = ["//common-cloud/spanner/src/main/java/io/grpc"],
+)
