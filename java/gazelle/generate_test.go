@@ -385,11 +385,15 @@ func TestSnakeToPascalCase(t *testing.T) {
 		input string
 		want  string
 	}{
-		"empty":          {input: "", want: ""},
-		"single_char":    {input: "a", want: "A"},
-		"already_pascal": {input: "Http", want: "Http"},
-		"simple":         {input: "http", want: "Http"},
-		"snake_case":     {input: "sawmill_raw_http_request", want: "SawmillRawHttpRequest"},
+		"empty":               {input: "", want: ""},
+		"single_char":         {input: "a", want: "A"},
+		"already_pascal":      {input: "Http", want: "Http"},
+		"simple":              {input: "http", want: "Http"},
+		"snake_case":          {input: "sawmill_raw_http_request", want: "SawmillRawHttpRequest"},
+		"letter_after_digits": {input: "a2p_10dlc", want: "A2P10Dlc"},
+		"digit_word_suffix":   {input: "authn_3ds", want: "Authn3Ds"},
+		"existing_capitals":   {input: "already_HTTP", want: "AlreadyHTTP"},
+		"other_separators":    {input: "dash-dot.name", want: "DashDotName"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := snakeToPascalCase(tc.input)
@@ -429,9 +433,114 @@ func TestProtoOuterClassName(t *testing.T) {
 			},
 			want: "CustomName",
 		},
+		"default_outer_class_conflicts_with_service": {
+			fileInfo: proto.FileInfo{Name: "cart_service.proto", Services: []string{"CartService"}},
+			want:     "CartServiceOuterClass",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			got := protoOuterClassName(tc.fileInfo)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestParseProtoJavaLayout(t *testing.T) {
+	content := []byte(`
+    syntax = "proto2";
+    option java_multiple_files = true;
+    option java_generic_services = true;
+    // message CommentedOut {}
+    message TopLevel {
+      message NestedMessage {}
+      enum NestedEnum { UNKNOWN = 0; }
+    }
+    enum TopLevelEnum { UNKNOWN = 0; }
+    service TopLevelService {}
+  `)
+
+	got := parseProtoJavaLayout(content)
+	require.True(t, got.multipleFiles)
+	require.True(t, got.genericServices)
+	require.Equal(t, []string{"TopLevel"}, got.topLevelMessages)
+	require.Equal(t, []string{"TopLevelEnum"}, got.topLevelEnums)
+}
+
+func TestParseProtoJavaLayoutDefaultsToSingleFile(t *testing.T) {
+	content := []byte(`
+    syntax = "proto2";
+    message TopLevel {}
+  `)
+
+	got := parseProtoJavaLayout(content)
+	require.False(t, got.multipleFiles)
+	require.False(t, got.genericServices)
+	require.Equal(t, []string{"TopLevel"}, got.topLevelMessages)
+	require.Empty(t, got.topLevelEnums)
+}
+
+func TestGeneratedProtoClasses(t *testing.T) {
+	packageName := types.NewPackageName("com.example")
+	for name, tc := range map[string]struct {
+		fileInfo proto.FileInfo
+		layout   protoJavaLayout
+		want     []string
+	}{
+		"single_file_with_generic_service": {
+			fileInfo: proto.FileInfo{
+				Name:     "service.proto",
+				Services: []string{"SquareTokenService"},
+			},
+			layout: protoJavaLayout{
+				genericServices:  true,
+				topLevelMessages: []string{"Cart"},
+			},
+			want: []string{
+				"com.example.Service",
+				"com.example.Service.SquareTokenService",
+				"com.example.SquareTokenServiceGrpc",
+			},
+		},
+		"multiple_files_with_non_generic_service": {
+			fileInfo: proto.FileInfo{
+				Name:     "commerce.proto",
+				Services: []string{"OrderService"},
+			},
+			layout: protoJavaLayout{
+				multipleFiles:    true,
+				topLevelMessages: []string{"Order"},
+				topLevelEnums:    []string{"Status"},
+			},
+			want: []string{
+				"com.example.Commerce",
+				"com.example.Order",
+				"com.example.OrderOrBuilder",
+				"com.example.OrderServiceGrpc",
+				"com.example.Status",
+			},
+		},
+		"multiple_files_with_generic_service": {
+			fileInfo: proto.FileInfo{
+				Name:     "admin_service.proto",
+				Services: []string{"AdminService"},
+			},
+			layout: protoJavaLayout{
+				multipleFiles:   true,
+				genericServices: true,
+			},
+			want: []string{
+				"com.example.AdminService",
+				"com.example.AdminServiceGrpc",
+				"com.example.AdminServiceOuterClass",
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			classes := generatedProtoClasses(tc.fileInfo, tc.layout, packageName)
+			got := make([]string, 0, classes.Len())
+			for _, class := range classes.SortedSlice() {
+				got = append(got, class.FullyQualifiedClassName())
+			}
 			require.Equal(t, tc.want, got)
 		})
 	}
