@@ -447,10 +447,10 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 			if generateResources {
 				resourcesPath := path.Join(cfg.SourcesetRoot(), "resources")
 
-				// Check if the resources directory actually exists
+				// Only reference files owned by this resource package. A directory whose
+				// contents all live below nested BUILD boundaries has no target here.
 				fullResourcesPath := filepath.Join(args.Config.RepoRoot, filepath.FromSlash(resourcesPath))
-				if _, err := os.Stat(fullResourcesPath); err == nil {
-					// Resources directory exists, add the reference
+				if resourceDirectoryOwnsFiles(fullResourcesPath) {
 					if aggregateAtRoot {
 						// Module mode: reference pkg_files directly as resources
 						resourcesDirectRef = "//" + resourcesPath + ":resources"
@@ -1528,6 +1528,49 @@ func (l javaLang) generateJavaTestSuite(file *rule.File, name string, srcs []str
 	res.Imports = append(res.Imports, resolveInput)
 }
 
+// resourceDirectoryOwnsFiles reports whether dir contains a non-Java resource
+// that belongs to dir's Bazel package. Nested directories with a BUILD file are
+// separate packages and therefore cannot contribute files to the parent target.
+func resourceDirectoryOwnsFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "BUILD" || name == "BUILD.bazel" {
+			continue
+		}
+
+		if entry.IsDir() {
+			child := filepath.Join(dir, name)
+			if directoryHasBuildFile(child) {
+				continue
+			}
+			if resourceDirectoryOwnsFiles(child) {
+				return true
+			}
+			continue
+		}
+
+		if filepath.Ext(name) != ".java" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func directoryHasBuildFile(dir string) bool {
+	for _, name := range []string{"BUILD", "BUILD.bazel"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // collectResourceFilesRecursively walks through subdirectories and collects resource files
 func collectResourceFilesRecursively(args language.GenerateArgs, subdirPath string) []string {
 	var resourceFiles []string
@@ -1538,6 +1581,14 @@ func collectResourceFilesRecursively(args language.GenerateArgs, subdirPath stri
 	if err != nil {
 		// If we can't read the directory, skip it
 		return resourceFiles
+	}
+
+	// Match Bazel's glob semantics: a nested BUILD starts a new package, so files below
+	// it cannot be named directly by the resources target in the parent package.
+	for _, entry := range entries {
+		if entry.Name() == "BUILD" || entry.Name() == "BUILD.bazel" {
+			return nil
+		}
 	}
 
 	for _, entry := range entries {

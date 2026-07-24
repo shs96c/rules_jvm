@@ -1,6 +1,8 @@
 package gazelle
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/bazel-contrib/rules_jvm/java/gazelle/javaconfig"
@@ -519,6 +521,55 @@ func TestFilterNamespaceClassesInModule(t *testing.T) {
 		"com.example.mod.PaymentMethods.ExternalSplit",
 		"com.external.Widget",
 	}, gotClassNames)
+}
+
+func TestCollectResourceFilesRecursivelyStopsAtPackageBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	for _, subdir := range []string{"resources/nested", "resources/package"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, subdir), 0o755))
+	}
+	for name, contents := range map[string]string{
+		"resources/direct.txt":        "direct",
+		"resources/nested/kept.txt":   "nested",
+		"resources/package/BUILD":     "filegroup(name = \"resources\")",
+		"resources/package/owned.txt": "owned",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o644))
+	}
+
+	got := collectResourceFilesRecursively(language.GenerateArgs{Dir: dir}, "resources")
+	require.ElementsMatch(t, []string{
+		"resources/direct.txt",
+		"resources/nested/kept.txt",
+	}, got)
+}
+
+func TestResourceDirectoryOwnsFilesStopsAtPackageBoundaries(t *testing.T) {
+	dir := t.TempDir()
+	for _, subdir := range []string{"nested", "package"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, subdir), 0o755))
+	}
+	for name, contents := range map[string]string{
+		"BUILD":                 "filegroup(name = \"resources\")",
+		"nested/kept.txt":       "kept",
+		"package/BUILD":         "filegroup(name = \"resources\")",
+		"package/not-owned.txt": "not owned",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o644))
+	}
+
+	require.True(t, resourceDirectoryOwnsFiles(dir))
+	require.NoError(t, os.Remove(filepath.Join(dir, "nested/kept.txt")))
+	require.False(t, resourceDirectoryOwnsFiles(dir))
+	require.False(t, resourceDirectoryOwnsFiles(filepath.Join(dir, "missing")))
+}
+
+func TestResourceDirectoryOwnsFilesIgnoresJavaSources(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Only.java"), []byte("class Only {}"), 0o644))
+	require.False(t, resourceDirectoryOwnsFiles(dir))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "owned.yaml"), []byte("owned"), 0o644))
+	require.True(t, resourceDirectoryOwnsFiles(dir))
 }
 
 func TestIsOwnedByModuleRoot(t *testing.T) {
