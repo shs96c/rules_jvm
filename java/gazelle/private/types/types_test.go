@@ -41,6 +41,22 @@ func TestParseClassName(t *testing.T) {
 				innerClassNames:    []string{"Inner", "Nested"},
 			},
 		},
+		"lowercase nested proto types": {
+			from: "com.example.Outer.lowercase_nested.Value",
+			want: &ClassName{
+				packageName:        NewPackageName("com.example"),
+				bareOuterClassName: "Outer",
+				innerClassNames:    []string{"lowercase_nested", "Value"},
+			},
+		},
+		"static member": {
+			from: "org.example.DSL.noCondition",
+			want: &ClassName{
+				packageName:        NewPackageName("org.example"),
+				bareOuterClassName: "DSL",
+				innerClassNames:    []string{"noCondition"},
+			},
+		},
 		"anonymous inner": {
 			from: "com.example.Simple.",
 			want: &ClassName{

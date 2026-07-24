@@ -330,6 +330,17 @@ func TestSuite(t *testing.T) {
 	}
 }
 
+func TestDeclaredOuterClassNames(t *testing.T) {
+	declared := sorted_set.NewSortedSetFn([]types.ClassName{
+		types.NewClassName(types.NewPackageName("com.example"), "Regular"),
+		types.NewClassName(types.NewPackageName("com.example"), "lspe_config"),
+	}, types.ClassNameLess)
+
+	got := declaredOuterClassNames(declared).SortedSlice()
+	want := []string{"Regular", "lspe_config"}
+	require.Equal(t, want, got)
+}
+
 func TestAddNonLocalImports(t *testing.T) {
 	src := sorted_set.NewSortedSetFn[types.ClassName]([]types.ClassName{}, types.ClassNameLess)
 	for _, s := range []string{
@@ -338,6 +349,7 @@ func TestAddNonLocalImports(t *testing.T) {
 		"com.example.a.b.Bar.SubBar", // same pkg, nested class, included class name: delete
 		"com.example.a.b.Baz",        // same pkg, not included class name: keep
 		"com.example.a.b.Baz.SubBaz", // same pkg, nested class, not included class name: keep
+		"com.example.a.b.lspe_config.Builder",
 		"com.example.a.b.c.Foo",      // different pkg: keep
 		"com.example.a.Foo",          // different pkg: keep
 		"com.another.a.b.Foo",        // different pkg: keep
@@ -351,7 +363,7 @@ func TestAddNonLocalImports(t *testing.T) {
 
 	depsDst := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
 	exportsDst := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
-	addNonLocalImportsAndExports(depsDst, nil, exportsDst, nil, src, sorted_set.NewSortedSetFn[types.PackageName]([]types.PackageName{}, types.PackageNameLess), sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess), types.NewPackageName("com.example.a.b"), sorted_set.NewSortedSet([]string{"Foo", "Bar"}))
+	addNonLocalImportsAndExports(depsDst, nil, exportsDst, nil, src, sorted_set.NewSortedSetFn[types.PackageName]([]types.PackageName{}, types.PackageNameLess), sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess), types.NewPackageName("com.example.a.b"), sorted_set.NewSortedSet([]string{"Foo", "Bar", "lspe_config"}))
 
 	want := stringsToPackageNames([]string{
 		"com.another.a.b",

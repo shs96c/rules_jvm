@@ -1,9 +1,10 @@
 package workspace.com.gazelle.java.javaparser.generators;
 
 import static com.example.Outer.Inner;
+import static com.example.Outer.android_process;
 
 public class StaticImportNestedClass {
-    // Inner should be resolvable as a type because the static import brings it into scope.
-    // Current parser doesn't register static-imported class names in currentFileImports.
+    // Static imports make nested type owners available by their bare names.
     Inner value;
+    android_process.Builder processBuilder;
 }

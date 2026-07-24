@@ -33,6 +33,28 @@ final class ClassNames {
     return false;
   }
 
+  /**
+   * Returns true for a class-like component inside an import path.
+   *
+   * <p>All-uppercase class names such as {@code DSL} are accepted only when another path component
+   * follows them, which distinguishes {@code DSL.noCondition} from a terminal constant import.
+   */
+  static boolean isLikelyClassNameInImportPath(String name, boolean hasTrailingComponent) {
+    if (isLikelyClassName(name)) {
+      return true;
+    }
+    if (!hasTrailingComponent || name.length() < 2 || !firstLetterIsUppercase(name)) {
+      return false;
+    }
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      if (c == '_' || (Character.isLetter(c) && !Character.isUpperCase(c))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private static boolean firstLetterIsUppercase(String value) {
     for (int i = 0; i < value.length(); i++) {
       char c = value.charAt(i);
