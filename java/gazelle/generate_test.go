@@ -492,6 +492,50 @@ GenJavaTests(
 	require.Equal(t, []string{"//processors:processor"}, res.Gen[0].AttrStrings("plugins"))
 }
 
+func TestCollisionFreeTestSuiteName(t *testing.T) {
+	cfg := javaconfig.New(".")
+
+	for name, tc := range map[string]struct {
+		dirname                 string
+		concreteTestTargetNames map[string]struct{}
+		wantSuite               string
+		wantGeneratedLibraries  []string
+	}{
+		"suite name matches concrete test target": {
+			dirname: "CATest",
+			concreteTestTargetNames: map[string]struct{}{
+				"CATest": {},
+			},
+			wantSuite: "CATest-tests",
+			wantGeneratedLibraries: []string{
+				"CATest-tests-test-lib",
+				"CATest-tests-test-deps-lib",
+				"CATest-tests-test-runtime-deps-lib",
+			},
+		},
+		"helper-only suite has no concrete test target": {
+			dirname:                 "AggregateExtensionsTest",
+			concreteTestTargetNames: map[string]struct{}{},
+			wantSuite:               "AggregateExtensionsTest",
+			wantGeneratedLibraries: []string{
+				"AggregateExtensionsTest-test-lib",
+				"AggregateExtensionsTest-test-deps-lib",
+				"AggregateExtensionsTest-test-runtime-deps-lib",
+			},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gotSuite := collisionFreeTestSuiteName(cfg, tc.dirname, false, tc.concreteTestTargetNames)
+			require.Equal(t, tc.wantSuite, gotSuite)
+			require.Equal(t, tc.wantGeneratedLibraries, []string{
+				testHelperLibname(gotSuite),
+				gotSuite + "-test-deps-lib",
+				gotSuite + "-test-runtime-deps-lib",
+			})
+		})
+	}
+}
+
 func TestTransitionExistingLibraryKind(t *testing.T) {
 	f, err := rule.LoadData("BUILD.bazel", "", []byte(`
 java_library(name = "kotlin")
