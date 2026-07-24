@@ -2448,6 +2448,136 @@ func TestJavaTestSuiteManagesResolvedPackageAssociate(t *testing.T) {
 	}
 }
 
+func TestProductionAssociatesCrossPackageWithConfiguredKotlinModule(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	configs := c.Exts[languageName].(javaconfig.Configs)
+	for _, pkg := range []string{"main/a", "main/b"} {
+		pc := javaconfig.New(c.RepoRoot)
+		if err := pc.SetKotlinModuleName("shared_main"); err != nil {
+			t.Fatal(err)
+		}
+		configs[pkg] = pc
+	}
+
+	jLang := langs[1].(*javaLang)
+	jLang.kotlinLibraries[label.New("", "main/b", "b").String()] = true
+	consumer := rule.NewRule("kt_jvm_library", "a")
+	consumer.SetAttr("srcs", []string{"A.kt"})
+	consumer.SetAttr("deps", []string{"//main/b:b"})
+	jLang.Resolver.(*Resolver).populateProductionAssociatesAttr(
+		c, consumer, label.New("", "main/a", "a"),
+	)
+
+	if got := consumer.AttrStrings("associates"); !reflect.DeepEqual(got, []string{"//main/b:b"}) {
+		t.Fatalf("associates = %v, want [//main/b:b]", got)
+	}
+	if got := consumer.AttrStrings("deps"); len(got) != 0 {
+		t.Fatalf("deps = %v, want none", got)
+	}
+	if got := consumer.AttrString("module_name"); got != "" {
+		t.Fatalf("non-leaf module_name = %q, want inherited module", got)
+	}
+
+	leaf := rule.NewRule("kt_jvm_library", "b")
+	leaf.SetAttr("srcs", []string{"B.kt"})
+	jLang.Resolver.(*Resolver).populateProductionAssociatesAttr(
+		c, leaf, label.New("", "main/b", "b"),
+	)
+	if got := leaf.AttrString("module_name"); got != "shared_main" {
+		t.Fatalf("leaf module_name = %q, want shared_main", got)
+	}
+}
+
+func TestKotlinTestAssociatesRequireOneModuleIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		moduleA        string
+		moduleB        string
+		wantAssociates []string
+		wantDeps       []string
+	}{
+		{
+			name:           "same explicit identity",
+			moduleA:        "shared_main",
+			moduleB:        "shared_main",
+			wantAssociates: []string{"//main/a", "//main/b"},
+			wantDeps:       []string{":unrelated"},
+		},
+		{
+			name:     "different explicit identities stay dependencies",
+			moduleA:  "main_a",
+			moduleB:  "main_b",
+			wantDeps: []string{":unrelated", "//main/a", "//main/b"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, langs, _ := testConfig(t)
+			configs := c.Exts[languageName].(javaconfig.Configs)
+			for pkg, moduleName := range map[string]string{
+				"main/a": tc.moduleA,
+				"main/b": tc.moduleB,
+			} {
+				pc := javaconfig.New(c.RepoRoot)
+				if err := pc.SetKotlinModuleName(moduleName); err != nil {
+					t.Fatal(err)
+				}
+				configs[pkg] = pc
+			}
+
+			mrslv, exts := InitTestResolversAndExtensions(langs)
+			ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+			jLang := langs[1].(*javaLang)
+			for _, main := range []struct {
+				pkg     string
+				name    string
+				javaPkg string
+				source  string
+			}{
+				{pkg: "main/a", name: "a", javaPkg: "com.example.a", source: "A.kt"},
+				{pkg: "main/b", name: "b", javaPkg: "com.example.b", source: "B.kt"},
+			} {
+				content := fmt.Sprintf(`kt_jvm_library(
+    name = %q,
+    srcs = [%q],
+    _packages = [%q],
+)`, main.name, main.source, main.javaPkg)
+				f, err := rule.LoadData(filepath.Join(main.pkg, "BUILD.bazel"), main.pkg, []byte(content))
+				if err != nil {
+					t.Fatal(err)
+				}
+				productionRule := f.Rules[0]
+				setPackagesPrivateAttr(productionRule)
+				jLang.kotlinLibraries[label.New("", main.pkg, main.name).String()] = true
+				ix.AddRule(c, productionRule, f)
+			}
+			ix.Finish()
+
+			testRule := rule.NewRule("kt_jvm_test", "test")
+			testRule.SetAttr("srcs", []string{"Test.kt"})
+			testRule.SetAttr("deps", []string{"//main/a:a", "//main/b:b", ":unrelated"})
+			resolveInput := types.ResolveInput{
+				PackageNames: sorted_set.NewSortedSetFn(
+					[]types.PackageName{
+						types.NewPackageName("com.example.a"),
+						types.NewPackageName("com.example.b"),
+					},
+					types.PackageNameLess,
+				),
+			}
+			jLang.Resolver.(*Resolver).populateAssociatesAttr(
+				c, ix, resolveInput, testRule, true, label.New("", "test", "test"),
+			)
+
+			if got := testRule.AttrStrings("associates"); !reflect.DeepEqual(got, tc.wantAssociates) {
+				t.Fatalf("associates = %v, want %v", got, tc.wantAssociates)
+			}
+			if got := testRule.AttrStrings("deps"); !reflect.DeepEqual(got, tc.wantDeps) {
+				t.Fatalf("deps = %v, want %v", got, tc.wantDeps)
+			}
+		})
+	}
+}
+
 // TestRuleIsTestOnly covers `testonly = True` detection across the two shapes
 // Gazelle has used to store the attribute: older Gazelle emitted
 // `*bzl.LiteralExpr{Token: "True"}` for `SetAttr("testonly", true)`; current
