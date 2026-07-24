@@ -81,6 +81,16 @@ public class KtParserTest {
   }
 
   @Test
+  public void fileJvmNameSetsTopLevelFacade() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("JvmNamedMain.kt"));
+
+    assertEquals(Set.of("Osgi"), data.mainClasses);
+    assertEquals(
+        Set.of("workspace.com.gazelle.kotlin.javaparser.generators.Osgi"),
+        data.perClassData.keySet());
+  }
+
+  @Test
   public void mainInClass() throws IOException {
     ParsedPackageData data = parser.parseClasses(getPathsWithNames("MainInClass.kt"));
 
@@ -94,6 +104,17 @@ public class KtParserTest {
     assertEquals(
         Set.of("workspace.com.gazelle.kotlin.javaparser.generators.MainInClass"),
         data.declaredTypes);
+  }
+
+  @Test
+  public void mainInNamedObject() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("MainInNamedObject.kt"));
+
+    assertEquals(Set.of("workspace.com.gazelle.kotlin.javaparser.generators"), data.packages);
+    assertEquals(Set.of("MainInNamedObject"), data.mainClasses);
+    assertEquals(
+        Set.of("workspace.com.gazelle.kotlin.javaparser.generators.MainInNamedObject"),
+        data.perClassData.keySet());
   }
 
   @Test
@@ -463,6 +484,17 @@ public class KtParserTest {
       assertFalse(data.usedTypes.contains(samePackage + defaultType));
       assertFalse(data.exportedTypes.contains(samePackage + defaultType));
     }
+  }
+
+  @Test
+  public void ownCapitalizedPackageNamespaceIsNotAType() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("OwnPackageNamespace.kt"));
+    String ownPackage =
+        "workspace.com.gazelle.kotlin.javaparser.generators.queryengines.PaymentMethods";
+
+    assertTrue(data.packages.contains(ownPackage));
+    assertFalse(data.usedTypes.contains(ownPackage));
+    assertFalse(data.exportedTypes.contains(ownPackage));
   }
 
   private List<Path> getPathsWithNames(String... names) throws IOException {
