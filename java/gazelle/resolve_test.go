@@ -1192,13 +1192,14 @@ func TestKotlinTestAssociatesOnlyKotlinProductionLibrary(t *testing.T) {
 			name:       "java production library stays a dependency",
 			mainKind:   "java_library",
 			mainSource: "Main.java",
-			wantDeps:   []string{":main"},
+			wantDeps:   []string{"//:main", ":unrelated"},
 		},
 		{
 			name:           "kotlin production library becomes an associate",
 			mainKind:       "kt_jvm_library",
 			mainSource:     "Main.kt",
 			wantAssociates: []string{":main"},
+			wantDeps:       []string{":unrelated"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1227,7 +1228,11 @@ func TestKotlinTestAssociatesOnlyKotlinProductionLibrary(t *testing.T) {
 
 			testRule := rule.NewRule("kt_jvm_test", "test")
 			testRule.SetAttr("srcs", []string{"Test.kt"})
-			testRule.SetAttr("deps", []string{":main"})
+			oldDepsExpr := &bzl.ListExpr{List: []bzl.Expr{
+				&bzl.StringExpr{Value: "//:main"},
+				&bzl.StringExpr{Value: ":unrelated"},
+			}}
+			testRule.SetAttr("deps", oldDepsExpr)
 			resolveInput := types.ResolveInput{
 				PackageNames: sorted_set.NewSortedSetFn(
 					[]types.PackageName{types.NewPackageName("com.example")},
@@ -1239,6 +1244,9 @@ func TestKotlinTestAssociatesOnlyKotlinProductionLibrary(t *testing.T) {
 				c, ix, resolveInput, testRule, true, label.New("", "", "test"),
 			)
 
+			if tc.mainKind == "kt_jvm_library" && testRule.Attr("deps") == oldDepsExpr {
+				t.Fatal("deps still references the destination AST expression")
+			}
 			if got := testRule.AttrStrings("associates"); !reflect.DeepEqual(got, tc.wantAssociates) {
 				t.Errorf("associates mismatch:\n got: %v\nwant: %v", got, tc.wantAssociates)
 			}
@@ -1246,6 +1254,83 @@ func TestKotlinTestAssociatesOnlyKotlinProductionLibrary(t *testing.T) {
 				t.Errorf("deps mismatch:\n got: %v\nwant: %v", got, tc.wantDeps)
 			}
 		})
+	}
+}
+
+func TestJavaTestSuiteManagesResolvedPackageAssociate(t *testing.T) {
+	c, langs, _ := testConfig(t)
+	mrslv, exts := InitTestResolversAndExtensions(langs)
+	ix := resolve.NewRuleIndex(mrslv.Resolver, exts...)
+	jLang := langs[1].(*javaLang)
+	kinds := jLang.Kinds()
+
+	if !kinds["java_test_suite"].ResolveAttrs["associates"] {
+		t.Fatal("java_test_suite does not manage associates during the post-resolve merge")
+	}
+	for _, kind := range []string{"java_binary", "java_test"} {
+		if kinds[kind].ResolveAttrs["associates"] {
+			t.Errorf("%s unexpectedly manages associates", kind)
+		}
+	}
+
+	const productionPkg = "src/main/kotlin/com/example"
+	javaPackage := types.NewPackageName("com.example")
+	productionFile, err := rule.LoadData(
+		filepath.Join(productionPkg, "BUILD.bazel"),
+		productionPkg,
+		[]byte(`kt_jvm_library(
+    name = "example",
+    srcs = ["Main.kt"],
+    _packages = ["com.example"],
+)`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	productionRule := productionFile.Rules[0]
+	setPackagesPrivateAttr(productionRule)
+	productionLabel := label.New("", productionPkg, "example")
+	jLang.kotlinLibraries[productionLabel.String()] = true
+	ix.AddRule(c, productionRule, productionFile)
+	ix.Finish()
+
+	generated := rule.NewRule("java_test_suite", "example")
+	generated.SetAttr("srcs", []string{"ExampleTest.kt"})
+	generated.SetAttr("deps", []string{productionLabel.String(), ":unrelated"})
+	resolveInput := types.ResolveInput{
+		PackageNames: sorted_set.NewSortedSetFn(
+			[]types.PackageName{javaPackage},
+			types.PackageNameLess,
+		),
+	}
+	from := label.New("", "src/test/kotlin/com/example", "example")
+	jLang.Resolver.(*Resolver).populateAssociatesAttr(c, ix, resolveInput, generated, true, from)
+
+	wantAssociate := simplifyLabel(c.RepoName, productionLabel, from).String()
+	if got := generated.AttrStrings("associates"); !reflect.DeepEqual(got, []string{wantAssociate}) {
+		t.Fatalf("generated associates mismatch:\n got: %v\nwant: %v", got, []string{wantAssociate})
+	}
+	if got := generated.AttrStrings("deps"); !reflect.DeepEqual(got, []string{":unrelated"}) {
+		t.Fatalf("generated deps mismatch:\n got: %v\nwant: %v", got, []string{":unrelated"})
+	}
+
+	existingFile, err := rule.LoadData("BUILD.bazel", from.Pkg, []byte(`java_test_suite(
+    name = "example",
+    srcs = ["ExampleTest.kt"],
+    associates = ["//stale:main"],
+    deps = ["//stale:dep"],
+)`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	existing := existingFile.Rules[0]
+	rule.MergeRules(generated, existing, kinds["java_test_suite"].ResolveAttrs, existingFile.Path)
+
+	if got := existing.AttrStrings("associates"); !reflect.DeepEqual(got, []string{wantAssociate}) {
+		t.Errorf("merged associates mismatch:\n got: %v\nwant: %v", got, []string{wantAssociate})
+	}
+	if got := existing.AttrStrings("deps"); !reflect.DeepEqual(got, []string{":unrelated"}) {
+		t.Errorf("merged deps mismatch:\n got: %v\nwant: %v", got, []string{":unrelated"})
 	}
 }
 

@@ -113,6 +113,24 @@ var kindWithRuntimeDeps = rule.KindInfo{
 		"runtime_deps": true,
 	},
 }
+
+// associates is populated while resolving a generated java_test_suite. Keep it
+// suite-specific: java_binary and the concrete Java test kinds do not accept
+// that attribute.
+var javaTestSuiteKind = rule.KindInfo{
+	NonEmptyAttrs: map[string]bool{
+		"deps": true,
+		"srcs": true,
+	},
+	MergeableAttrs: map[string]bool{"srcs": true},
+	ResolveAttrs: map[string]bool{
+		"associates":   true,
+		"deps":         true,
+		"plugins":      true,
+		"runtime_deps": true,
+	},
+}
+
 var kindWithoutRuntimeDeps = rule.KindInfo{
 	NonEmptyAttrs: map[string]bool{
 		"deps": true,
@@ -178,7 +196,7 @@ func (l javaLang) Kinds() map[string]rule.KindInfo {
 		"java_library":       javaLibraryKind,
 		"java_export":        javaExportKind,
 		"java_test":          kindWithRuntimeDeps,
-		"java_test_suite":    kindWithRuntimeDeps,
+		"java_test_suite":    javaTestSuiteKind,
 		"java_proto_library": kindWithoutRuntimeDeps,
 		"java_grpc_library":  kindWithoutRuntimeDeps,
 		"kt_jvm_library":     kotlinLibraryKind,
