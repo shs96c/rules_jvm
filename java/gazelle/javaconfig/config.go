@@ -337,13 +337,10 @@ func (c *Config) SetModuleGranularity(granularity string) error {
 		return fmt.Errorf("%s: possible values are module/package/scc", granularity)
 	}
 
-	// Both "module" (one coarse target) and "scc" (minimal fine-grained targets) aggregate
-	// the whole subtree at the topmost directory that enables them.
-	if granularity == "module" || granularity == "scc" {
-		if c.parent == nil || c.parent.moduleGranularity == "package" {
-			c.isModuleRoot = true
-		}
-	}
+	// NewChild copies granularity without calling this setter, so every explicit module/scc
+	// directive marks a root. This makes a nested explicit directive a real boundary even
+	// when its parent also aggregates at module granularity.
+	c.isModuleRoot = granularity == "module" || granularity == "scc"
 
 	c.moduleGranularity = granularity
 
