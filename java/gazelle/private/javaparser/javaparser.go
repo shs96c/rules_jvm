@@ -116,7 +116,7 @@ func (r Runner) ParsePackage(ctx context.Context, in *ParsePackageRequest) (*jav
 	}
 	exportedClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 	for _, export := range resp.GetExportedClasses() {
-		className, err := types.ParseClassName(export)
+		className, err := types.ParseClassNameInPackage(packageName, export)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse exports: %w", err)
 		}
@@ -124,7 +124,7 @@ func (r Runner) ParsePackage(ctx context.Context, in *ParsePackageRequest) (*jav
 	}
 	internalClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 	for _, internal := range resp.GetInternalClasses() {
-		className, err := types.ParseClassName(internal)
+		className, err := types.ParseClassNameInPackage(packageName, internal)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse internal classes: %w", err)
 		}
@@ -132,7 +132,7 @@ func (r Runner) ParsePackage(ctx context.Context, in *ParsePackageRequest) (*jav
 	}
 	declaredClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 	for _, declared := range resp.GetDeclaredClasses() {
-		className, err := types.ParseClassName(declared)
+		className, err := types.ParseClassNameInPackage(packageName, declared)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse declared classes: %w", err)
 		}

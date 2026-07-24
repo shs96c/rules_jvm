@@ -669,6 +669,17 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 					l = jr.resolveTestSuiteHelperClass(c, imp, className, ix, from)
 				}
 				if l == label.NoLabel {
+					// A test directory named after its test class produces a package whose
+					// last segment is class-cased, so the import parsed as outer class
+					// "CATest" may really be class "CAHelper" in package com.example.CATest.
+					if reinterpreted, ok := outerClassAsPackage(className); ok {
+						l = jr.resolveSingleClass(c, pc, reinterpreted, ix, from, isTestRule, preferredExistingLabels)
+						if l == label.NoLabel && isTestRule {
+							l = jr.resolveTestSuiteHelperClass(c, reinterpreted.PackageName(), reinterpreted, ix, from)
+						}
+					}
+				}
+				if l == label.NoLabel {
 					l, err = jr.resolveMavenWholePackageClass(pc, className)
 					if err != nil {
 						jr.lang.logger.Warn().Err(err).Str("class", className.FullyQualifiedClassName()).Msg("error resolving class")
@@ -869,6 +880,20 @@ func mavenLabelContainsOwnerLeaf(mavenName, ownerPkg string) bool {
 func symbolLooksLikeClass(className types.ClassName) bool {
 	runes := []rune(className.BareOuterClassName())
 	return len(runes) > 0 && unicode.IsUpper(runes[0])
+}
+
+// outerClassAsPackage re-reads a parsed class name, treating its outer class
+// as the last package segment and its first nested name as the class. This
+// recovers imports from packages with a class-cased segment, which
+// ParseClassName cannot distinguish from an outer class.
+func outerClassAsPackage(className types.ClassName) (types.ClassName, bool) {
+	outer := className.FullyQualifiedOuterClassName()
+	full := className.FullyQualifiedClassName()
+	if full == outer {
+		return types.ClassName{}, false
+	}
+	nested := strings.Split(full[len(outer)+1:], ".")
+	return types.NewClassName(types.NewPackageName(outer), nested[0]), true
 }
 
 func isGenericWorkspaceToken(token string) bool {
