@@ -178,33 +178,37 @@ func (jr *Resolver) populateAssociatesAttr(c *config.Config, ix *resolve.RuleInd
 	}
 
 	associates := sorted_set.NewSortedSetFn([]label.Label{}, sorted_set.LabelLess)
+	configs := c.Exts[languageName].(javaconfig.Configs)
+	pc := configs[from.Pkg]
 	for _, pkg := range resolveInput.PackageNames.SortedSlice() {
-		mainSpec := resolve.ImportSpec{Lang: languageName, Imp: types.NewResolvableJavaPackage(pkg, false, false).String()}
-		matches := ix.FindRulesByImportWithConfig(c, mainSpec, languageName)
-		if len(matches) != 1 {
-			continue
+		for _, mainLabel := range jr.productionAssociateLabels(c, pc, ix, resolveInput, pkg, from).SortedSlice() {
+			if mainLabel == from.Abs(from.Repo, from.Pkg) {
+				continue
+			}
+			// Generated current-repository libraries are recorded with repository-less
+			// labels, while Gazelle's rule index returns labels qualified by RepoName.
+			if mainLabel.Repo != "" && mainLabel.Repo != c.RepoName {
+				continue
+			}
+			kotlinLibraryKey := label.New("", mainLabel.Pkg, mainLabel.Name).String()
+			if !jr.lang.kotlinLibraries[kotlinLibraryKey] {
+				continue
+			}
+			associates.Add(simplifyLabel(c.RepoName, mainLabel, from))
 		}
-		mainLabel := matches[0].Label.Abs(from.Repo, from.Pkg)
-		if mainLabel == from.Abs(from.Repo, from.Pkg) {
-			continue
-		}
-		if !jr.lang.kotlinLibraries[mainLabel.String()] {
-			continue
-		}
-		associates.Add(simplifyLabel(c.RepoName, mainLabel, from))
 	}
 	if associates.Len() == 0 {
 		return
 	}
 
 	asStrings := make([]string, 0, associates.Len())
-	associateSet := make(map[string]bool, associates.Len())
+	associateSet := make(map[label.Label]struct{}, associates.Len())
 	for _, a := range associates.SortedSlice() {
 		s := a.String()
 		asStrings = append(asStrings, s)
-		associateSet[s] = true
+		associateSet[normalizeLabelPreference(a, c.RepoName, from)] = struct{}{}
 	}
-	r.SetAttr("associates", asStrings)
+	replaceStringListAttr(r, "associates", asStrings)
 
 	// An associate is a friend dependency already on the compile and runtime classpath, so
 	// drop it from deps to avoid naming the same target twice (rules_kotlin treats associates
@@ -212,15 +216,48 @@ func (jr *Resolver) populateAssociatesAttr(c *config.Config, ix *resolve.RuleInd
 	if deps := r.AttrStrings("deps"); len(deps) > 0 {
 		kept := make([]string, 0, len(deps))
 		for _, d := range deps {
-			if !associateSet[d] {
+			parsed, err := label.Parse(d)
+			if err != nil {
+				kept = append(kept, d)
+				continue
+			}
+			if _, found := associateSet[normalizeLabelPreference(parsed, c.RepoName, from)]; !found {
 				kept = append(kept, d)
 			}
 		}
-		if len(kept) == 0 {
-			r.DelAttr("deps")
-		} else {
-			r.SetAttr("deps", kept)
+		replaceStringListAttr(r, "deps", kept)
+	}
+}
+
+func (jr *Resolver) productionAssociateLabels(c *config.Config, pc *javaconfig.Config, ix *resolve.RuleIndex, resolveInput types.ResolveInput, pkg types.PackageName, from label.Label) *sorted_set.SortedSet[label.Label] {
+	labels := sorted_set.NewSortedSetFn([]label.Label{}, sorted_set.LabelLess)
+	mainSpec := resolve.ImportSpec{Lang: languageName, Imp: types.NewResolvableJavaPackage(pkg, false, false).String()}
+	matches := ix.FindRulesByImportWithConfig(c, mainSpec, languageName)
+	if len(matches) == 1 {
+		labels.Add(matches[0].Label.Abs(from.Repo, from.Pkg))
+		return labels
+	}
+	if resolveInput.ImportedClasses == nil {
+		return labels
+	}
+	for _, className := range resolveInput.ImportedClasses.SortedSlice() {
+		if className.PackageName() != pkg {
+			continue
 		}
+		l := jr.resolveSingleClass(c, pc, className, ix, from, false, nil)
+		if l != label.NoLabel {
+			labels.Add(l.Abs(from.Repo, from.Pkg))
+		}
+	}
+	return labels
+}
+
+// replaceStringListAttr clears the destination AST before setting a managed list.
+// Gazelle's rule.SetAttr updates AttrStrings but may leave the old expression in place.
+func replaceStringListAttr(r *rule.Rule, attrName string, values []string) {
+	r.DelAttr(attrName)
+	if len(values) > 0 {
+		r.SetAttr(attrName, values)
 	}
 }
 
