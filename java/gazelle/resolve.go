@@ -741,6 +741,10 @@ func (jr *Resolver) populateAttr(c *config.Config, pc *javaconfig.Config, r *rul
 			if jr.ruleDeclaresClass(from, className) {
 				continue
 			}
+			jr.lang.logger.Warn().
+				Str("class", className.FullyQualifiedClassName()).
+				Stringer("from", from).
+				Msg("TAILDEBUG own-package class not declared by rule")
 			if l, found := findClassRuleWithOverride(c, className); found {
 				labels.Add(simplifyLabel(c.RepoName, l, from))
 				continue
@@ -1354,7 +1358,16 @@ func (jr *Resolver) shouldUseMavenClassLabel(c *config.Config, mavenLabel label.
 		return false
 	}
 	pci := jr.buildPackageClassIndex(c, className.PackageName(), ix)
-	return len(pci.prod) > 0 || (isTestRule && len(pci.test) > 0)
+	use := len(pci.prod) > 0 || (isTestRule && len(pci.test) > 0)
+	jr.lang.logger.Warn().
+		Str("class", className.FullyQualifiedClassName()).
+		Stringer("maven", mavenLabel).
+		Stringer("owner", owner).
+		Bool("use", use).
+		Int("pciProd", len(pci.prod)).
+		Int("pciTest", len(pci.test)).
+		Msg("TAILDEBUG gate: looksLikeOwner, not workspace-declared")
+	return use
 }
 
 func (jr *Resolver) workspaceDeclaresClass(c *config.Config, className types.ClassName, ix *resolve.RuleIndex, isTestRule bool) bool {
