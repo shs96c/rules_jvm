@@ -56,6 +56,7 @@ import org.jetbrains.kotlin.psi.KtReferenceExpression;
 import org.jetbrains.kotlin.psi.KtSafeQualifiedExpression;
 import org.jetbrains.kotlin.psi.KtSimpleNameExpression;
 import org.jetbrains.kotlin.psi.KtTreeVisitorVoid;
+import org.jetbrains.kotlin.psi.KtTypeAlias;
 import org.jetbrains.kotlin.psi.KtTypeElement;
 import org.jetbrains.kotlin.psi.KtTypeReference;
 import org.jetbrains.kotlin.psi.KtUnaryExpression;
@@ -299,6 +300,22 @@ public class KtParser {
       recordDeclaredType(clazz, clazz.getFqName());
       super.visitClass(clazz);
       popState(clazz);
+    }
+
+    @Override
+    public void visitTypeAlias(KtTypeAlias typeAlias) {
+      pushState(typeAlias);
+      if (!isVisible()) {
+        super.visitTypeAlias(typeAlias);
+        popState(typeAlias);
+        return;
+      }
+      // An alias is importable like a class, so dependers must be able to find its
+      // declaring target through the class index.
+      recordInternalType(typeAlias, typeAlias.getFqName());
+      recordDeclaredType(typeAlias, typeAlias.getFqName());
+      super.visitTypeAlias(typeAlias);
+      popState(typeAlias);
     }
 
     @Override

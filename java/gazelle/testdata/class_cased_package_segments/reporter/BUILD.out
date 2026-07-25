@@ -1,0 +1,19 @@
+load("@rules_kotlin//kotlin:jvm.bzl", "kt_jvm_library")
+
+# gazelle:jvm_kotlin_enabled true
+# gazelle:java_module_granularity module
+
+kt_jvm_library(
+    name = "reporter",
+    srcs = [
+        "calc/Calculator.kt",
+        "engines/PaymentMethods/AggregationExtensions.kt",
+        "engines/PaymentMethods/AggregationHelper.kt",
+        "engines/PaymentMethods/AvailableFilters/QueryEngine.kt",
+        "engines/PaymentMethods/CursorHelpers.kt",
+        "engines/PaymentMethods/TypeAliases.kt",
+        "engines/PaymentMethods/util/Defaults.kt",
+        "generated/ReportRows.kt",
+    ],
+    visibility = ["//:__subpackages__"],
+)
