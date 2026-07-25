@@ -186,6 +186,17 @@ public class KtParserTest {
   }
 
   @Test
+  public void typeAliasesAreDeclaredTypes() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("TypeAliases.kt"));
+
+    assertEquals(
+        Set.of(
+            "workspace.com.gazelle.kotlin.javaparser.generators.PlainAlias",
+            "workspace.com.gazelle.kotlin.javaparser.generators.NestedAlias"),
+        data.declaredTypes);
+  }
+
+  @Test
   public void constantTest() throws IOException {
     ParsedPackageData data = parser.parseClasses(getPathsWithNames("Constant.kt"));
 
