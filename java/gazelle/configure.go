@@ -76,6 +76,7 @@ func (jc *Configurer) KnownDirectives() []string {
 		javaconfig.JavaMavenInstallFile,
 		javaconfig.JavaMavenRepositoryName,
 		javaconfig.JavaModuleGranularityDirective,
+		javaconfig.JavaKotlinModuleName,
 		javaconfig.JavaResolveToJavaExports,
 		javaconfig.JavaSourcesetRoot,
 		javaconfig.JavaStripResourcesPrefix,
@@ -179,6 +180,11 @@ func (jc *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 			case javaconfig.JavaModuleGranularityDirective:
 				if err := cfg.SetModuleGranularity(d.Value); err != nil {
 					jc.lang.logger.Fatal().Err(err).Msgf("invalid value for directive %q", javaconfig.JavaModuleGranularityDirective)
+				}
+
+			case javaconfig.JavaKotlinModuleName:
+				if err := cfg.SetKotlinModuleName(d.Value); err != nil {
+					jc.lang.logger.Fatal().Err(err).Msgf("invalid value for directive %q", javaconfig.JavaKotlinModuleName)
 				}
 
 			case javaconfig.JavaTestFileSuffixes:

@@ -73,6 +73,33 @@ func addAnnotationProcessorClassesAndExtraImports(
 	}
 }
 
+// isOwnedByModuleRoot reports whether candidateRel belongs to the aggregate
+// rooted at moduleRootRel. A package-granularity subtree or a nested aggregate
+// root owns its own sources and must not also be folded into the parent module.
+func isOwnedByModuleRoot(cfgs javaconfig.Configs, candidateRel, moduleRootRel string) bool {
+	if candidateRel != moduleRootRel && moduleRootRel != "" && !strings.HasPrefix(candidateRel, moduleRootRel+"/") {
+		return false
+	}
+
+	for current := candidateRel; current != moduleRootRel; {
+		cfg, ok := cfgs[current]
+		if !ok || cfg.ModuleGranularity() == "package" || cfg.IsModuleRoot() {
+			return false
+		}
+
+		parent := path.Dir(current)
+		if parent == "." {
+			parent = ""
+		}
+		if parent == current {
+			return false
+		}
+		current = parent
+	}
+
+	return true
+}
+
 type separateJavaTestReasons struct {
 	attributes map[string]bzl.Expr
 	wrapper    string
@@ -112,7 +139,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		srcFilenamesRelativeToPackage = filterStrSlice(args.RegularFiles, func(f string) bool { return filepath.Ext(f) == ".java" })
 	}
 
-	isResourcesRoot := strings.HasSuffix(args.Rel, "/resources")
+	isResourcesRoot := cfg.SourcesetRoot() != "" && args.Rel == path.Join(cfg.SourcesetRoot(), "resources")
 	isResourcesSubdir := strings.Contains(args.Rel, "/resources/") && !isResourcesRoot
 	granularity := cfg.ModuleGranularity()
 	// "module" emits one coarse library for the whole subtree; "scc" emits the minimal set
@@ -228,33 +255,42 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 
 	// All java packages present in this bazel package.
 	allPackageNames := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	allDeclaredClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 
 	annotationProcessorClasses := sorted_set.NewSortedSetFn(nil, types.ClassNameLess)
 
 	if aggregateAtRoot {
 		for mRel, mJavaPkg := range l.javaPackageCache {
-			if !strings.HasPrefix(mRel, args.Rel) {
+			if !isOwnedByModuleRoot(cfgs, mRel, args.Rel) {
 				continue
 			}
 			allPackageNames.Add(mJavaPkg.Name)
+			allDeclaredClasses.AddAll(mJavaPkg.DeclaredClasses)
+			mLocalOuterClassNames := declaredOuterClassNames(mJavaPkg.DeclaredClasses)
 
 			if !mJavaPkg.TestPackage {
-				addNonLocalImportsAndExports(productionJavaImports, productionJavaImportedClasses, nonLocalJavaExports, nonLocalJavaExternalExportedClasses, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, likelyLocalClassNames)
+				addNonLocalImportsAndExports(productionJavaImports, productionJavaImportedClasses, nonLocalJavaExports, nonLocalJavaExternalExportedClasses, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, mLocalOuterClassNames)
 				nonLocalJavaExportedClasses.AddAll(mJavaPkg.DeclaredClasses)
 				for _, f := range mJavaPkg.Files.SortedSlice() {
 					productionJavaFiles.Add(filepath.Join(mRel, f))
+					if strings.HasSuffix(f, ".kt") {
+						hasKotlinFiles = true
+					}
 					jf := javaFile{pathRelativeToBazelWorkspaceRoot: filepath.Join(mRel, f), pkg: mJavaPkg.Name}
 					nonLocalJavaExportedClasses.Add(*jf.ClassName())
 				}
 				allMains.AddAll(mJavaPkg.Mains)
 			} else {
 				// Tests don't get to export things, as things shouldn't depend on them.
-				addNonLocalImportsAndExports(testJavaImports, testJavaImportedClasses, nil, nil, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, likelyLocalClassNames)
+				addNonLocalImportsAndExports(testJavaImports, testJavaImportedClasses, nil, nil, mJavaPkg.ImportedClasses, mJavaPkg.ImportedPackagesWithoutSpecificClasses, mJavaPkg.ExportedClasses, mJavaPkg.Name, mLocalOuterClassNames)
 				for _, f := range mJavaPkg.Files.SortedSlice() {
 					path := filepath.Join(mRel, f)
 					file := javaFile{
 						pathRelativeToBazelWorkspaceRoot: path,
 						pkg:                              mJavaPkg.Name,
+					}
+					if strings.HasSuffix(f, ".kt") {
+						hasKotlinFiles = true
 					}
 					accumulateJavaFile(cfg, testJavaFiles, testHelperJavaFiles, separateTestJavaFiles, file, mJavaPkg.PerClassMetadata, log)
 					if cfg.IsJavaTestFile(filepath.Base(path)) {
@@ -275,6 +311,7 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		}
 	} else {
 		allPackageNames.Add(javaPkg.Name)
+		allDeclaredClasses.AddAll(javaPkg.DeclaredClasses)
 		if javaPkg.TestPackage {
 			// Tests don't get to export things, as things shouldn't depend on them.
 			addNonLocalImportsAndExports(testJavaImports, testJavaImportedClasses, nil, nil, javaPkg.ImportedClasses, javaPkg.ImportedPackagesWithoutSpecificClasses, javaPkg.ExportedClasses, javaPkg.Name, likelyLocalClassNames)
@@ -314,12 +351,16 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		)
 	}
 
-	nonLocalProductionJavaImports := productionJavaImports.Filter(func(p types.PackageName) bool {
-		return !allPackageNames.Contains(p)
-	})
-	nonLocalProductionJavaImportedClasses := productionJavaImportedClasses.Filter(func(c types.ClassName) bool {
-		return !allPackageNames.Contains(c.PackageName())
-	})
+	nonLocalProductionJavaImports, nonLocalProductionJavaImportedClasses :=
+		filterImportsInModule(productionJavaImports, productionJavaImportedClasses, allPackageNames, allDeclaredClasses)
+	// Exports from sub-packages can name classes in *other* packages of the same
+	// module (e.g. a Kotlin extension function on a class from a sibling package).
+	// Those are added to nonLocalJavaExports / nonLocalJavaExternalExportedClasses by
+	// `addFilteringOutOwnPackage`, which only knows the per-file ownPackage, not the
+	// module-wide set. Strip them here so the module's own packages don't leak into
+	// `exports` at resolve time -- mirroring the imports filter above.
+	nonLocalJavaExports, nonLocalJavaExternalExportedClasses =
+		filterNamespaceClassesInModule(nonLocalJavaExports, nonLocalJavaExternalExportedClasses, allPackageNames, allDeclaredClasses)
 	nonLocalJavaExports = nonLocalJavaExports.Filter(func(p types.PackageName) bool {
 		return !allPackageNames.Contains(p)
 	})
@@ -332,8 +373,12 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		javaLibraryKind = "kt_jvm_library"
 	}
 
+	mainLibraryNames := make(map[string]string)
 	// Check if this is a resources root directory and generate a pkg_files target
 	if isResourcesRoot && len(srcFilenamesRelativeToPackage) == 0 {
+		if hasUnmanagedResourceTarget(args.File) {
+			return res
+		}
 		// Collect resource files recursively from this directory and all subdirectories
 		var allResourceFiles []string
 
@@ -391,6 +436,11 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				res.Gen = append(res.Gen, resourceLib)
 				res.Imports = append(res.Imports, types.ResolveInput{})
 			}
+		} else {
+			res.Empty = append(res.Empty, rule.NewRule("pkg_files", "resources"))
+			if !aggregateAtRoot {
+				res.Empty = append(res.Empty, rule.NewRule(javaLibraryKind, "resources_lib"))
+			}
 		}
 	} else if productionJavaFiles.Len() > 0 {
 		var resourcesDirectRef string  // For module mode: direct reference to pkg_files
@@ -406,10 +456,10 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 			if generateResources {
 				resourcesPath := path.Join(cfg.SourcesetRoot(), "resources")
 
-				// Check if the resources directory actually exists
+				// Only reference files owned by this resource package. A directory whose
+				// contents all live below nested BUILD boundaries has no target here.
 				fullResourcesPath := filepath.Join(args.Config.RepoRoot, filepath.FromSlash(resourcesPath))
-				if _, err := os.Stat(fullResourcesPath); err == nil {
-					// Resources directory exists, add the reference
+				if resourceDirectoryOwnsFiles(fullResourcesPath) {
 					if aggregateAtRoot {
 						// Module mode: reference pkg_files directly as resources
 						resourcesDirectRef = "//" + resourcesPath + ":resources"
@@ -427,7 +477,8 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 			// library per package. Collapse only the packages that must share a module
 			// (import cycles + internal coupling) into the minimal set of targets;
 			// everything else stays its own per-package library.
-			l.emitModuleProductionLibraries(args, cfg, likelyLocalClassNames, resourcesDirectRef, resourcesRuntimeDep, &res, log)
+			mainLibraryNames = l.emitModuleProductionLibraries(args, cfg, likelyLocalClassNames, resourcesDirectRef, resourcesRuntimeDep, &res, log)
+			markStaleSCCLibrariesForDeletion(args.File, &res)
 		} else {
 			// "module" (one coarse library for the whole subtree) and "package" (this
 			// single package) both emit exactly one library here.
@@ -453,9 +504,9 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		}
 	}
 
-	if cfg.GenerateBinary() {
-		l.processJavaBinary(args.File, args.Rel, allMains, testHelperJavaFiles, &res, cfg)
-	}
+	allTestRelatedSrcs := testJavaFiles.Clone()
+	allTestRelatedSrcs.AddAll(testHelperJavaFiles)
+	l.processJavaBinary(args.File, args.Rel, allMains, allTestRelatedSrcs, mainLibraryNames, &res, cfg)
 
 	// We add special packages to point to testonly libraries which - this accumulates them,
 	// as well as the existing java imports of tests.
@@ -497,9 +548,6 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		}
 	}
 
-	allTestRelatedSrcs := testJavaFiles.Clone()
-	allTestRelatedSrcs.AddAll(testHelperJavaFiles)
-
 	if allTestRelatedSrcs.Len() > 0 {
 		switch cfg.TestMode() {
 		case "file":
@@ -514,14 +562,23 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 				packageNames.Add(tf.pkg)
 			}
 
-			suiteName := cfg.MapTestSuiteName(filepath.Base(args.Rel), aggregateAtRoot)
-
 			srcs := make([]string, 0, allTestRelatedSrcs.Len())
+			concreteTestTargetNames := make(map[string]struct{}, testJavaFiles.Len())
 			for _, src := range allTestRelatedSrcs.SortedSlice() {
 				if _, ok := separateTestJavaFiles[src]; !ok {
-					srcs = append(srcs, strings.TrimPrefix(filepath.ToSlash(src.pathRelativeToBazelWorkspaceRoot), args.Rel+"/"))
+					relativeSrc := strings.TrimPrefix(filepath.ToSlash(src.pathRelativeToBazelWorkspaceRoot), args.Rel+"/")
+					srcs = append(srcs, relativeSrc)
+					if testJavaFiles.Contains(src) {
+						concreteTestTargetNames[testTargetNameFromSource(relativeSrc)] = struct{}{}
+					}
 				}
 			}
+			for src := range separateTestJavaFiles {
+				concreteTestTargetNames[javaTestTargetName(src, aggregateAtRoot)] = struct{}{}
+			}
+
+			dirname := filepath.Base(args.Rel)
+			suiteName := collisionFreeTestSuiteName(cfg, dirname, aggregateAtRoot, concreteTestTargetNames)
 			sort.Strings(srcs)
 			if len(srcs) > 0 {
 				l.generateJavaTestSuite(
@@ -571,6 +628,9 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	}
 
 	for i := 0; i < len(res.Gen); i++ {
+		if isTestRuleKind(args.Config, cfg, res.Gen[i].Kind()) || ruleIsTestOnly(res.Gen[i]) {
+			copyExistingAssociates(args.File, res.Gen[i])
+		}
 		log.Debug().Fields(map[string]interface{}{
 			"idx":     i,
 			"rule":    fmt.Sprintf("%#v", res.Gen[i]),
@@ -581,6 +641,29 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	return res
 }
 
+func markStaleSCCLibrariesForDeletion(file *rule.File, res *language.GenerateResult) {
+	if file == nil {
+		return
+	}
+	generatedNames := make(map[string]bool, len(res.Gen))
+	for _, generated := range res.Gen {
+		generatedNames[generated.Name()] = true
+	}
+	for _, existing := range file.Rules {
+		// Empty stubs also run after resolution and would erase live dependencies.
+		if generatedNames[existing.Name()] {
+			continue
+		}
+		if existing.Kind() != "java_library" && existing.Kind() != "kt_jvm_library" {
+			continue
+		}
+		if len(existing.AttrStrings("srcs")) == 0 {
+			continue
+		}
+		res.Empty = append(res.Empty, rule.NewRule(existing.Kind(), existing.Name()))
+	}
+}
+
 // emitModuleProductionLibraries emits one production library per SCC group of the
 // module's production packages. Each group is the minimal set of source directories
 // that must compile as a single target (import cycles for any JVM language, plus Kotlin
@@ -588,11 +671,13 @@ func (l javaLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 // group. Imports
 // satisfied by another group are left in place for the resolver to turn into `deps`
 // pointing at that group's label, which works because each group registers the packages
-// it owns.
-func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg *javaconfig.Config, likelyLocalClassNames *sorted_set.SortedSet[string], resourcesDirectRef, resourcesRuntimeDep string, res *language.GenerateResult, log zerolog.Logger) {
+// it owns. The returned map connects each parsed main class to its emitted group so
+// generated binaries can depend on the real SCC owner rather than a coarse default.
+func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg *javaconfig.Config, likelyLocalClassNames *sorted_set.SortedSet[string], resourcesDirectRef, resourcesRuntimeDep string, res *language.GenerateResult, log zerolog.Logger) map[string]string {
+	cfgs := args.Config.Exts[languageName].(javaconfig.Configs)
 	productionPackagesByDir := make(map[string]*java.Package)
 	for mRel, mJavaPkg := range l.javaPackageCache {
-		if !strings.HasPrefix(mRel, args.Rel) || mJavaPkg.TestPackage {
+		if !isOwnedByModuleRoot(cfgs, mRel, args.Rel) || mJavaPkg.TestPackage {
 			continue
 		}
 		if mJavaPkg.Files == nil || mJavaPkg.Files.Len() == 0 {
@@ -605,6 +690,7 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 	if err != nil {
 		log.Fatal().Err(err).Msg("could not compute module collapse")
 	}
+	mainLibraryNames := make(map[string]string)
 
 	for _, group := range graph.Groups() {
 		groupFiles := sorted_set.NewSortedSet([]string{})
@@ -621,9 +707,14 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 		// The module root has no sources of its own, so the rule kind is determined by
 		// the group's files rather than args.RegularFiles.
 		groupLibraryKind := "java_library"
+		groupLibraryName := cfg.MapLibraryName(group.Name)
 		for _, dir := range group.Dirs {
 			pkg := productionPackagesByDir[dir]
+			for _, main := range pkg.Mains.SortedSlice() {
+				mainLibraryNames[main.FullyQualifiedClassName()] = groupLibraryName
+			}
 			addNonLocalImportsAndExports(imports, importedClasses, exports, externalExportedClasses, pkg.ImportedClasses, pkg.ImportedPackagesWithoutSpecificClasses, pkg.ExportedClasses, pkg.Name, likelyLocalClassNames)
+			ownClasses.AddAll(pkg.DeclaredClasses)
 			for _, f := range pkg.Files.SortedSlice() {
 				if strings.HasSuffix(f, ".kt") {
 					groupLibraryKind = "kt_jvm_library"
@@ -661,7 +752,7 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 			LibraryKind:             groupLibraryKind,
 			Result:                  res,
 			Config:                  cfg,
-			Name:                    group.Name,
+			Name:                    groupLibraryName,
 			Srcs:                    groupFiles.SortedSlice(),
 			ResourcesDirectRef:      resourcesDirectRef,
 			ResourcesRuntimeDep:     resourcesRuntimeDep,
@@ -675,12 +766,17 @@ func (l javaLang) emitModuleProductionLibraries(args language.GenerateArgs, cfg 
 			TestOnly:                cfg.TestOnly(),
 		})
 	}
+	return mainLibraryNames
 }
 
 func (l javaLang) collectRuntimeDeps(kind, name string, file *rule.File) *sorted_set.SortedSet[label.Label] {
-	runtimeDeps := sorted_set.NewSortedSetFn([]label.Label{}, labelLess)
+	return l.collectExistingLabelAttr(name, "runtime_deps", file)
+}
+
+func (l javaLang) collectExistingLabelAttr(name, attrName string, file *rule.File) *sorted_set.SortedSet[label.Label] {
+	labels := sorted_set.NewSortedSetFn([]label.Label{}, labelLess)
 	if file == nil {
-		return runtimeDeps
+		return labels
 	}
 
 	for _, r := range file.Rules {
@@ -688,26 +784,27 @@ func (l javaLang) collectRuntimeDeps(kind, name string, file *rule.File) *sorted
 			continue
 		}
 
-		// This does not support non string list values from runtime_deps.
+		// This does not support non-string list values.
 		// Currently, that means if a target has a runtime_deps of a different
 		// kind (e.g. a select), we will remove it. Hopefully in the future we
 		// can be less destructive.
-		for _, dep := range r.AttrStrings("runtime_deps") {
-			parsedLabel, err := label.Parse(dep)
+		for _, value := range r.AttrStrings(attrName) {
+			parsedLabel, err := label.Parse(value)
 			if err != nil {
 				l.logger.Fatal().
 					Str("file.Pkg", file.Pkg).
 					Str("name", name).
-					Str("dep", dep).
+					Str("attr", attrName).
+					Str("value", value).
 					Err(err).
 					Msg("label parse error")
 			}
-			runtimeDeps.Add(parsedLabel)
+			labels.Add(parsedLabel)
 		}
 		break
 	}
 
-	return runtimeDeps
+	return labels
 }
 
 func generateProtoLibraries(l *javaLang, args language.GenerateArgs, log zerolog.Logger, res *language.GenerateResult, cfg *javaconfig.Config) {
@@ -760,34 +857,24 @@ func generateProtoLibraries(l *javaLang, args language.GenerateArgs, log zerolog
 		rjl.SetPrivateAttr(packagesKey, []types.ResolvableJavaPackage{*types.NewResolvableJavaPackage(packageName, false, false)})
 
 		// Extract class names from proto files for class-level resolution.
-		// Proto compilation generates Java classes for each message, enum, service,
-		// and an outer class (named after the proto file or via java_outer_classname option).
-		var protoClasses []types.ClassName
+		// Proto compilation always generates an outer class and gRPC service stubs.
+		// With java_multiple_files it also generates top-level messages, enums, and
+		// an OrBuilder interface for each top-level message.
+		protoClasses := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
 		for _, fileInfo := range protoPackage.Files {
-			// Add the outer class name (container for all types in the proto file)
-			outerClassName := protoOuterClassName(fileInfo)
-			if outerClassName != "" {
-				protoClasses = append(protoClasses, types.NewClassName(packageName, outerClassName))
-			}
-			for _, msg := range fileInfo.Messages {
-				protoClasses = append(protoClasses, types.NewClassName(packageName, msg))
-			}
-			for _, enum := range fileInfo.Enums {
-				protoClasses = append(protoClasses, types.NewClassName(packageName, enum))
-			}
-			for _, svc := range fileInfo.Services {
-				protoClasses = append(protoClasses, types.NewClassName(packageName, svc))
-			}
+			layout := inspectProtoJavaLayout(fileInfo)
+			protoClasses.AddAll(generatedProtoClasses(fileInfo, layout, packageName))
 		}
-		if len(protoClasses) > 0 {
-			rjl.SetPrivateAttr(classesKey, protoClasses)
+		if protoClasses.Len() > 0 {
+			classes := protoClasses.SortedSlice()
+			rjl.SetPrivateAttr(classesKey, classes)
 			ruleLabel := label.New("", args.Rel, jlName)
 			l.classExportCache[ruleLabel.String()] = classExportInfo{
-				classes:  protoClasses,
+				classes:  classes,
 				testonly: false,
 			}
-			classNames := make([]string, 0, len(protoClasses))
-			for _, c := range protoClasses {
+			classNames := make([]string, 0, len(classes))
+			for _, c := range classes {
 				classNames = append(classNames, c.BareOuterClassName())
 			}
 			log.Debug().
@@ -802,6 +889,162 @@ func generateProtoLibraries(l *javaLang, args language.GenerateArgs, log zerolog
 			PackageNames: sorted_set.NewSortedSetFn([]types.PackageName{packageName}, types.PackageNameLess),
 		})
 	}
+}
+
+type protoJavaLayout struct {
+	multipleFiles    bool
+	genericServices  bool
+	topLevelMessages []string
+	topLevelEnums    []string
+}
+
+func generatedProtoClasses(
+	fileInfo proto.FileInfo,
+	layout protoJavaLayout,
+	packageName types.PackageName,
+) *sorted_set.SortedSet[types.ClassName] {
+	classes := sorted_set.NewSortedSetFn([]types.ClassName{}, types.ClassNameLess)
+	outerClassName := protoOuterClassName(fileInfo)
+	if outerClassName != "" {
+		classes.Add(types.NewClassName(packageName, outerClassName))
+	}
+	for _, service := range fileInfo.Services {
+		classes.Add(types.NewClassName(packageName, service+"Grpc"))
+		if !layout.genericServices {
+			continue
+		}
+		if layout.multipleFiles {
+			classes.Add(types.NewClassName(packageName, service))
+			continue
+		}
+		if outerClassName == "" {
+			continue
+		}
+		nestedServiceName := outerClassName + "." + service
+		if packageName.Name != "" {
+			nestedServiceName = packageName.Name + "." + nestedServiceName
+		}
+		nestedService, err := types.ParseClassName(nestedServiceName)
+		if err == nil {
+			classes.Add(*nestedService)
+		}
+	}
+	if !layout.multipleFiles {
+		return classes
+	}
+	for _, message := range layout.topLevelMessages {
+		classes.Add(types.NewClassName(packageName, message))
+		classes.Add(types.NewClassName(packageName, message+"OrBuilder"))
+	}
+	for _, enum := range layout.topLevelEnums {
+		classes.Add(types.NewClassName(packageName, enum))
+	}
+	return classes
+}
+
+func inspectProtoJavaLayout(fileInfo proto.FileInfo) protoJavaLayout {
+	content, err := os.ReadFile(fileInfo.Path)
+	if err != nil {
+		return protoJavaLayout{}
+	}
+	return parseProtoJavaLayout(content)
+}
+
+func parseProtoJavaLayout(content []byte) protoJavaLayout {
+	tokens := tokenizeProto(content)
+	layout := protoJavaLayout{}
+	depth := 0
+	for i, token := range tokens {
+		switch token {
+		case "{":
+			depth++
+		case "}":
+			if depth > 0 {
+				depth--
+			}
+		default:
+			if depth != 0 {
+				continue
+			}
+			if token == "option" && i+4 < len(tokens) &&
+				tokens[i+2] == "=" && tokens[i+4] == ";" {
+				enabled := tokens[i+3] == "true"
+				switch tokens[i+1] {
+				case "java_multiple_files":
+					layout.multipleFiles = enabled
+				case "java_generic_services":
+					layout.genericServices = enabled
+				}
+				continue
+			}
+			if i+1 >= len(tokens) {
+				continue
+			}
+			switch token {
+			case "message":
+				layout.topLevelMessages = append(layout.topLevelMessages, tokens[i+1])
+			case "enum":
+				layout.topLevelEnums = append(layout.topLevelEnums, tokens[i+1])
+			}
+		}
+	}
+	return layout
+}
+
+func tokenizeProto(content []byte) []string {
+	var tokens []string
+	for i := 0; i < len(content); {
+		switch {
+		case content[i] == '/' && i+1 < len(content) && content[i+1] == '/':
+			i += 2
+			for i < len(content) && content[i] != '\n' {
+				i++
+			}
+		case content[i] == '/' && i+1 < len(content) && content[i+1] == '*':
+			i += 2
+			for i+1 < len(content) && !(content[i] == '*' && content[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(content) {
+				i += 2
+			}
+		case content[i] == '"' || content[i] == '\'':
+			quote := content[i]
+			i++
+			for i < len(content) {
+				if content[i] == '\\' {
+					i += 2
+					continue
+				}
+				if content[i] == quote {
+					i++
+					break
+				}
+				i++
+			}
+		case isProtoIdentifierStart(content[i]):
+			start := i
+			i++
+			for i < len(content) && isProtoIdentifierPart(content[i]) {
+				i++
+			}
+			tokens = append(tokens, string(content[start:i]))
+		case content[i] == '{' || content[i] == '}' || content[i] == '=' || content[i] == ';':
+			tokens = append(tokens, string(content[i]))
+			i++
+		default:
+			i++
+		}
+	}
+	return tokens
+}
+
+func isProtoIdentifierStart(value byte) bool {
+	return value == '_' || value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+func isProtoIdentifierPart(value byte) bool {
+	return isProtoIdentifierStart(value) || value >= '0' && value <= '9'
 }
 
 // protoOuterClassName returns the outer class name for a proto file.
@@ -822,19 +1065,48 @@ func protoOuterClassName(fileInfo proto.FileInfo) string {
 	if name == "" {
 		return ""
 	}
-	// Convert to PascalCase (capitalize first letter, handle underscores)
-	return snakeToPascalCase(name)
-}
+	// Convert to PascalCase (capitalize first letter, handle underscores).
+	outerClassName := snakeToPascalCase(name)
 
-// snakeToPascalCase converts a snake_case string to PascalCase.
-func snakeToPascalCase(s string) string {
-	parts := strings.Split(s, "_")
-	for i, part := range parts {
-		if len(part) > 0 {
-			parts[i] = strings.ToUpper(part[:1]) + part[1:]
+	// Protoc's legacy Java outer-class naming appends "OuterClass" when the
+	// filename-derived name conflicts with any message, enum, or service in the
+	// file. Gazelle's proto metadata also includes nested declarations, matching
+	// protoc's recursive message collision check.
+	for _, names := range [][]string{fileInfo.Messages, fileInfo.Enums, fileInfo.Services} {
+		for _, declaredName := range names {
+			if declaredName == outerClassName {
+				return outerClassName + "OuterClass"
+			}
 		}
 	}
-	return strings.Join(parts, "")
+
+	return outerClassName
+}
+
+// snakeToPascalCase converts a proto filename stem to the Java outer-class
+// spelling used by protoc.
+func snakeToPascalCase(s string) string {
+	var result strings.Builder
+	capitalizeNext := true
+	for _, char := range s {
+		switch {
+		case char >= 'a' && char <= 'z':
+			if capitalizeNext {
+				char -= 'a' - 'A'
+			}
+			result.WriteRune(char)
+			capitalizeNext = false
+		case char >= 'A' && char <= 'Z':
+			result.WriteRune(char)
+			capitalizeNext = false
+		case char >= '0' && char <= '9':
+			result.WriteRune(char)
+			capitalizeNext = true
+		default:
+			capitalizeNext = true
+		}
+	}
+	return result.String()
 }
 
 // We exclude intra-target imports because otherwise we'd get self-dependencies come resolve time.
@@ -847,10 +1119,79 @@ func addNonLocalImportsAndExports(toImports *sorted_set.SortedSet[types.PackageN
 	}
 }
 
+// filterImportsInModule drops package-level imports satisfied by the same
+// module, but preserves class-level imports unless the module declares them.
+// The resolver needs those remaining classes to find a different workspace
+// target that supplies an undeclared class in a split package.
+func filterImportsInModule(packages *sorted_set.SortedSet[types.PackageName], classes *sorted_set.SortedSet[types.ClassName], modulePackages *sorted_set.SortedSet[types.PackageName], declaredClasses *sorted_set.SortedSet[types.ClassName]) (*sorted_set.SortedSet[types.PackageName], *sorted_set.SortedSet[types.ClassName]) {
+	packages, classes =
+		filterNamespaceClassesInModule(packages, classes, modulePackages, declaredClasses)
+	return packages.Filter(func(p types.PackageName) bool {
+		return !modulePackages.Contains(p)
+	}), classes
+}
+
+// filterNamespaceClassesInModule removes parser-produced classes that are
+// actually owned package namespaces or locally declared classes. Declaration
+// matching keeps undeclared external split-package classes visible.
+func filterNamespaceClassesInModule(packages *sorted_set.SortedSet[types.PackageName], classes *sorted_set.SortedSet[types.ClassName], modulePackages *sorted_set.SortedSet[types.PackageName], declaredClasses *sorted_set.SortedSet[types.ClassName]) (*sorted_set.SortedSet[types.PackageName], *sorted_set.SortedSet[types.ClassName]) {
+	ownedPackageNames := make(map[string]struct{}, modulePackages.Len())
+	for _, modulePackage := range modulePackages.SortedSlice() {
+		ownedPackageNames[modulePackage.Name] = struct{}{}
+	}
+	declaredClassNames := make(map[string]struct{}, declaredClasses.Len())
+	for _, declaredClass := range declaredClasses.SortedSlice() {
+		declaredClassNames[declaredClass.FullyQualifiedClassName()] = struct{}{}
+	}
+	falseClassPackages := sorted_set.NewSortedSetFn([]types.PackageName{}, types.PackageNameLess)
+	filteredClasses := classes.Filter(func(class types.ClassName) bool {
+		className := class.FullyQualifiedClassName()
+		_, owned := ownedPackageNames[className]
+		for candidate := className; !owned && candidate != ""; {
+			if _, declared := declaredClassNames[candidate]; declared {
+				owned = true
+				break
+			}
+			lastDot := strings.LastIndexByte(candidate, '.')
+			if lastDot < 0 {
+				break
+			}
+			candidate = candidate[:lastDot]
+		}
+		if owned {
+			falseClassPackages.Add(class.PackageName())
+		}
+		return !owned
+	})
+	filteredPackages := packages.Filter(func(pkg types.PackageName) bool {
+		return !falseClassPackages.Contains(pkg)
+	})
+	return filteredPackages, filteredClasses
+}
+
+func declaredOuterClassNames(classes *sorted_set.SortedSet[types.ClassName]) *sorted_set.SortedSet[string] {
+	names := sorted_set.NewSortedSet([]string{})
+	for _, class := range classes.SortedSlice() {
+		names.Add(class.BareOuterClassName())
+	}
+	return names
+}
+
 func addFilteringOutOwnPackage(to *sorted_set.SortedSet[types.PackageName], toClasses *sorted_set.SortedSet[types.ClassName], from *sorted_set.SortedSet[types.ClassName], ownPackage types.PackageName, localOuterClassNames *sorted_set.SortedSet[string]) {
 	for _, fromPackage := range from.SortedSlice() {
 		if ownPackage == fromPackage.PackageName() {
 			if localOuterClassNames.Contains(fromPackage.BareOuterClassName()) {
+				continue
+			}
+		}
+		// A lowercase top-level Java class is parsed as another package segment.
+		// Filter it only when that exact first suffix segment is a class declared
+		// by this source set; unrelated subpackages must remain dependencies.
+		ownPackagePrefix := ownPackage.Name + "."
+		fullClassName := fromPackage.FullyQualifiedClassName()
+		if ownPackage.Name != "" && strings.HasPrefix(fullClassName, ownPackagePrefix) {
+			firstSuffixSegment := strings.SplitN(strings.TrimPrefix(fullClassName, ownPackagePrefix), ".", 2)[0]
+			if localOuterClassNames.Contains(firstSuffixSegment) {
 				continue
 			}
 		}
@@ -865,7 +1206,6 @@ func addFilteringOutOwnPackage(to *sorted_set.SortedSet[types.PackageName], toCl
 		}
 	}
 }
-
 func accumulateJavaFile(cfg *javaconfig.Config, testJavaFiles, testHelperJavaFiles *sorted_set.SortedSet[javaFile], separateTestJavaFiles map[javaFile]separateJavaTestReasons, file javaFile, perClassMetadata map[string]java.PerClassMetadata, log zerolog.Logger) {
 	if cfg.IsJavaTestFile(filepath.Base(file.pathRelativeToBazelWorkspaceRoot)) {
 		annotationClassNames := sorted_set.NewSortedSetFn[types.ClassName](nil, types.ClassNameLess)
@@ -915,6 +1255,23 @@ func accumulateJavaFile(cfg *javaconfig.Config, testJavaFiles, testHelperJavaFil
 	}
 }
 
+// transitionExistingLibraryKind lets Gazelle merge a library while its generated kind
+// changes from Java to Kotlin. Gazelle otherwise rejects a same-name/different-kind match,
+// leaves the stale parsed rule in the index, and loses the generated rule's private package
+// and class ownership metadata for the resolve phase.
+func transitionExistingLibraryKind(file *rule.File, name, desiredKind string) {
+	if file == nil || desiredKind != "kt_jvm_library" {
+		return
+	}
+	for _, existing := range file.Rules {
+		if existing.Name() != name || existing.Kind() != "java_library" || existing.ShouldKeep() {
+			continue
+		}
+		existing.SetKind(desiredKind)
+		return
+	}
+}
+
 // generateJavaLibraryArgs describes a single java_library target to generate. It groups
 // the many per-library attributes that would otherwise be positional arguments,
 // several of which share a type and so are easy to transpose by mistake.
@@ -946,7 +1303,12 @@ type generateJavaLibraryArgs struct {
 }
 
 func (l javaLang) generateJavaLibrary(args generateJavaLibraryArgs) {
+	transitionExistingLibraryKind(args.File, args.Name, args.LibraryKind)
 	r := rule.NewRule(args.LibraryKind, args.Name)
+
+	if plugins := l.collectExistingLabelAttr(args.Name, "plugins", args.File); plugins.Len() > 0 {
+		r.SetAttr("plugins", labelsToStrings(plugins.SortedSlice()))
+	}
 
 	if args.LibraryKind == "kt_jvm_library" {
 		// Record this Kotlin library so the resolver can turn a depender's same-module dep
@@ -1038,27 +1400,68 @@ func (l javaLang) generateJavaLibrary(args generateJavaLibraryArgs) {
 	}
 }
 
-func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorted_set.SortedSet[types.ClassName], testHelperJavaFiles *sorted_set.SortedSet[javaFile], res *language.GenerateResult, cfg *javaconfig.Config) {
-	var testHelperJavaClasses *sorted_set.SortedSet[types.ClassName]
-	for _, m := range allMains.SortedSlice() {
-		// Lazily populate because java_binaries are pretty rare
-		if testHelperJavaClasses == nil {
-			testHelperJavaClasses = sorted_set.NewSortedSetFn[types.ClassName]([]types.ClassName{}, types.ClassNameLess)
-			for _, testHelperJavaFile := range testHelperJavaFiles.SortedSlice() {
-				testHelperJavaClasses.Add(*testHelperJavaFile.ClassName())
-			}
+func indexJavaFileClasses(javaFiles *sorted_set.SortedSet[javaFile]) map[string]struct{} {
+	classes := make(map[string]struct{})
+	if javaFiles == nil {
+		return classes
+	}
+	for _, javaFile := range javaFiles.SortedSlice() {
+		class := javaFile.ClassName().FullyQualifiedClassName()
+		classes[class] = struct{}{}
+		if strings.HasSuffix(javaFile.pathRelativeToBazelWorkspaceRoot, ".kt") {
+			classes[class+"Kt"] = struct{}{}
 		}
-		isTestOnly := false
-		libName := cfg.MapLibraryName(filepath.Base(rel))
-		if testHelperJavaClasses.Contains(m) {
-			isTestOnly = true
-			libName = testHelperLibname(libName)
+	}
+	return classes
+}
+
+// javaFileClassesOwnMain reports whether main is compiled from one of the indexed
+// source files. Parser mains are package-relative strings passed to NewClassName,
+// so a nested main may be stored as the apparent outer name "Outer.Inner" rather
+// than ClassName.innerClassNames. Walk dotted prefixes down to the source owner
+// instead of relying on FullyQualifiedOuterClassName to normalize that shape.
+func javaFileClassesOwnMain(classes map[string]struct{}, main types.ClassName) bool {
+	candidate := main.FullyQualifiedClassName()
+	packageName := main.PackageName().Name
+	for {
+		if _, ok := classes[candidate]; ok {
+			return true
 		}
-		l.generateJavaBinary(file, m, libName, isTestOnly, res)
+		lastDot := strings.LastIndex(candidate, ".")
+		if lastDot < 0 || (packageName != "" && lastDot <= len(packageName)) {
+			return false
+		}
+		candidate = candidate[:lastDot]
 	}
 }
 
-func (l javaLang) generateJavaBinary(file *rule.File, m types.ClassName, libName string, testonly bool, res *language.GenerateResult) {
+func (l javaLang) processJavaBinary(file *rule.File, rel string, allMains *sorted_set.SortedSet[types.ClassName], testOwnedJavaFiles *sorted_set.SortedSet[javaFile], mainLibraryNames map[string]string, res *language.GenerateResult, cfg *javaconfig.Config) {
+	defaultLibraryName := cfg.MapLibraryName(filepath.Base(rel))
+	var testOwnedJavaClasses map[string]struct{}
+	for _, m := range allMains.SortedSlice() {
+		// Lazily populate because java_binaries are pretty rare
+		if testOwnedJavaClasses == nil {
+			testOwnedJavaClasses = indexJavaFileClasses(testOwnedJavaFiles)
+		}
+		if javaFileClassesOwnMain(testOwnedJavaClasses, m) {
+			// Gazelle only removes an obsolete existing rule when the generator emits
+			// an Empty stub. Match the default generated name so custom-named,
+			// intentionally hand-owned binaries for the same main remain untouched.
+			res.Empty = append(res.Empty, rule.NewRule("java_binary", m.BareOuterClassName()))
+			continue
+		}
+		if !cfg.GenerateBinary() {
+			continue
+		}
+		libraryName := defaultLibraryName
+		if owner, ok := mainLibraryNames[m.FullyQualifiedClassName()]; ok {
+			libraryName = owner
+		}
+		l.generateJavaBinary(file, m, libraryName, defaultLibraryName, false, res)
+	}
+}
+
+func (l javaLang) generateJavaBinary(file *rule.File, m types.ClassName, libName, defaultLibName string, testonly bool, res *language.GenerateResult) {
 	const ruleKind = "java_binary"
 	name := m.BareOuterClassName()
 	r := rule.NewRule("java_binary", name) // FIXME check collision on name
@@ -1069,6 +1472,13 @@ func (l javaLang) generateJavaBinary(file *rule.File, m types.ClassName, libName
 	}
 
 	runtimeDeps := l.collectRuntimeDeps(ruleKind, name, file)
+	if libName != defaultLibName {
+		// A previous run may have generated the coarse default before SCC ownership was
+		// available. Remove only that relative label; preserve every reviewed runtime dep.
+		runtimeDeps = runtimeDeps.Filter(func(dep label.Label) bool {
+			return !dep.Relative || dep.Name != defaultLibName
+		})
+	}
 	runtimeDeps.Add(label.Label{Name: libName, Relative: true})
 	r.SetAttr("runtime_deps", labelsToStrings(runtimeDeps.SortedSlice()))
 	r.SetAttr("visibility", []string{"//visibility:public"})
@@ -1081,12 +1491,7 @@ func (l javaLang) generateJavaBinary(file *rule.File, m types.ClassName, libName
 func (l javaLang) generateJavaTest(file *rule.File, pathToPackageRelativeToBazelWorkspace string, mavenRepositoryName string, f javaFile, includePackageInName bool, imports *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], annotationProcessorClasses *sorted_set.SortedSet[types.ClassName], depOnTestHelpers *string, wrapper string, extraAttributes map[string]bzl.Expr, res *language.GenerateResult) {
 	className := f.ClassName()
 	fullyQualifiedTestClass := className.FullyQualifiedClassName()
-	var testName string
-	if includePackageInName {
-		testName = strings.ReplaceAll(fullyQualifiedTestClass, ".", "_")
-	} else {
-		testName = className.BareOuterClassName()
-	}
+	testName := javaTestTargetName(f, includePackageInName)
 
 	javaRuleKind := "java_test"
 	if importsJunit5(imports) {
@@ -1170,6 +1575,9 @@ var junit5RuntimeDeps = []string{
 func (l javaLang) generateJavaTestSuite(file *rule.File, name string, srcs []string, packageNames *sorted_set.SortedSet[types.PackageName], mavenRepositoryName string, imports *sorted_set.SortedSet[types.PackageName], importedClasses *sorted_set.SortedSet[types.ClassName], annotationProcessorClasses *sorted_set.SortedSet[types.ClassName], customTestSuffixes *[]string, hasHelpers bool, res *language.GenerateResult) {
 	const ruleKind = "java_test_suite"
 	r := rule.NewRule(ruleKind, name)
+	if plugins := l.collectExistingLabelAttr(name, "plugins", file); plugins.Len() > 0 {
+		r.SetAttr("plugins", labelsToStrings(plugins.SortedSlice()))
+	}
 	r.SetAttr("srcs", srcs)
 	resolvablePackages := make([]types.ResolvableJavaPackage, 0, packageNames.Len())
 	if hasHelpers {
@@ -1214,6 +1622,61 @@ func (l javaLang) generateJavaTestSuite(file *rule.File, name string, srcs []str
 	res.Imports = append(res.Imports, resolveInput)
 }
 
+func hasUnmanagedResourceTarget(file *rule.File) bool {
+	if file != nil {
+		for _, r := range file.Rules {
+			// Handwritten resources can remain valid without local files.
+			if r.Name() == "resources" && r.Kind() != "pkg_files" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// resourceDirectoryOwnsFiles reports whether dir contains a non-Java resource
+// that belongs to dir's Bazel package. Nested directories with a BUILD file are
+// separate packages and therefore cannot contribute files to the parent target.
+func resourceDirectoryOwnsFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "BUILD" || name == "BUILD.bazel" {
+			continue
+		}
+
+		if entry.IsDir() {
+			child := filepath.Join(dir, name)
+			if directoryHasBuildFile(child) {
+				continue
+			}
+			if resourceDirectoryOwnsFiles(child) {
+				return true
+			}
+			continue
+		}
+
+		if filepath.Ext(name) != ".java" {
+			return true
+		}
+	}
+
+	return false
+}
+
+func directoryHasBuildFile(dir string) bool {
+	for _, name := range []string{"BUILD", "BUILD.bazel"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // collectResourceFilesRecursively walks through subdirectories and collects resource files
 func collectResourceFilesRecursively(args language.GenerateArgs, subdirPath string) []string {
 	var resourceFiles []string
@@ -1224,6 +1687,14 @@ func collectResourceFilesRecursively(args language.GenerateArgs, subdirPath stri
 	if err != nil {
 		// If we can't read the directory, skip it
 		return resourceFiles
+	}
+
+	// Match Bazel's glob semantics: a nested BUILD starts a new package, so files below
+	// it cannot be named directly by the resources target in the parent package.
+	for _, entry := range entries {
+		if entry.Name() == "BUILD" || entry.Name() == "BUILD.bazel" {
+			return nil
+		}
 	}
 
 	for _, entry := range entries {
@@ -1272,6 +1743,41 @@ func labelsToStrings(labels []label.Label) []string {
 
 func testHelperLibname(targetName string) string {
 	return targetName + "-test-lib"
+}
+
+func javaTestTargetName(f javaFile, includePackageInName bool) string {
+	className := f.ClassName()
+	if includePackageInName {
+		return strings.ReplaceAll(className.FullyQualifiedClassName(), ".", "_")
+	}
+	return className.BareOuterClassName()
+}
+
+func testTargetNameFromSource(src string) string {
+	extension := filepath.Ext(src)
+	return strings.TrimSuffix(src, extension)
+}
+
+func collisionFreeTestSuiteName(cfg *javaconfig.Config, dirname string, aggregateAtRoot bool, concreteTestTargetNames map[string]struct{}) string {
+	suiteName := cfg.MapTestSuiteName(dirname, aggregateAtRoot)
+	if _, collides := concreteTestTargetNames[suiteName]; !collides {
+		return suiteName
+	}
+
+	// Reuse module mode's default "{dirname}-tests" disambiguation. A custom
+	// convention can still map both modes to the colliding name, so fall back to
+	// that spelling explicitly and keep extending it only in the pathological
+	// case where a test source already owns the fallback target too.
+	suiteName = cfg.MapTestSuiteName(dirname, true)
+	if suiteName == cfg.MapTestSuiteName(dirname, aggregateAtRoot) {
+		suiteName = dirname + "-tests"
+	}
+	for {
+		if _, collides := concreteTestTargetNames[suiteName]; !collides {
+			return suiteName
+		}
+		suiteName += "-tests"
+	}
 }
 
 func ptr[T any](v T) *T {

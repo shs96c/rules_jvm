@@ -149,3 +149,22 @@ func TestGenerateProtoInheritsToChild(t *testing.T) {
 		t.Fatalf("child did not inherit generateProto=false from parent; got true")
 	}
 }
+
+func TestKotlinModuleNameInheritsToChild(t *testing.T) {
+	parent := javaconfig.New("/tmp")
+	if err := parent.SetKotlinModuleName("shared_module"); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := parent.NewChild().KotlinModuleName(); got != "shared_module" {
+		t.Fatalf("child KotlinModuleName() = %q, want shared_module", got)
+	}
+}
+
+func TestSetKotlinModuleNameValidation(t *testing.T) {
+	for _, invalid := range []string{"", " two", "two ", "two modules"} {
+		if err := javaconfig.New("/tmp").SetKotlinModuleName(invalid); err == nil {
+			t.Errorf("SetKotlinModuleName(%q) unexpectedly succeeded", invalid)
+		}
+	}
+}

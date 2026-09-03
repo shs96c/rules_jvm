@@ -81,6 +81,16 @@ public class KtParserTest {
   }
 
   @Test
+  public void fileJvmNameSetsTopLevelFacade() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("JvmNamedMain.kt"));
+
+    assertEquals(Set.of("Osgi"), data.mainClasses);
+    assertEquals(
+        Set.of("workspace.com.gazelle.kotlin.javaparser.generators.Osgi"),
+        data.perClassData.keySet());
+  }
+
+  @Test
   public void mainInClass() throws IOException {
     ParsedPackageData data = parser.parseClasses(getPathsWithNames("MainInClass.kt"));
 
@@ -94,6 +104,17 @@ public class KtParserTest {
     assertEquals(
         Set.of("workspace.com.gazelle.kotlin.javaparser.generators.MainInClass"),
         data.declaredTypes);
+  }
+
+  @Test
+  public void mainInNamedObject() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("MainInNamedObject.kt"));
+
+    assertEquals(Set.of("workspace.com.gazelle.kotlin.javaparser.generators"), data.packages);
+    assertEquals(Set.of("MainInNamedObject"), data.mainClasses);
+    assertEquals(
+        Set.of("workspace.com.gazelle.kotlin.javaparser.generators.MainInNamedObject"),
+        data.perClassData.keySet());
   }
 
   @Test
@@ -213,10 +234,56 @@ public class KtParserTest {
     // fully-qualified class reference.
     ParsedPackageData data = parser.parseClasses(getPathsWithNames("CallChainReceivers.kt"));
 
+    assertTrue(
+        data.usedTypes.contains("okio.Buffer"),
+        "Should detect a constructor call through a single-segment package. Found: "
+            + data.usedTypes);
+
     assertFalse(
         data.usedTypes.contains("Value.foo(1).Bar"),
         "Call-chain receivers with parens must not be treated as FQN class references. Found: "
             + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("localReceiver.Buffer"),
+        "Should not treat a local value receiver as a package. Found: " + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("parameterReceiver.Buffer"),
+        "Should not treat a parameter receiver as a package. Found: " + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("it.Buffer"),
+        "Should not treat an implicit lambda parameter as a package. Found: " + data.usedTypes);
+  }
+
+  @Test
+  public void testFullyQualifiedTopLevelFunctionDetected() throws IOException {
+    ParsedPackageData data =
+        parser.parseClasses(getPathsWithNames("FullyQualifiedTopLevelFunctions.kt"));
+
+    assertTrue(
+        data.usedTypes.contains("com.example.helpers.doThing"),
+        "Should record the importable top-level function symbol. Found: " + data.usedTypes);
+    assertTrue(
+        data.usedTypes.contains("com.example.Helper"),
+        "Should keep detecting a fully-qualified class receiver. Found: " + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("com.example.Helper.doThing"),
+        "Should not misclassify a static class call as a top-level function. Found: "
+            + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("valueReceiver.helpers.doThing"),
+        "Should not misclassify a value receiver as a package. Found: " + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("lineItems.discountList.map"),
+        "Should not misclassify an undeclared member chain as a package. Found: " + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("javaClass.classLoader.getResourceAsStream"),
+        "Should not misclassify a javaClass member chain as a package. Found: " + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("builder.data.build"),
+        "Should not misclassify a builder chain as a package. Found: " + data.usedTypes);
+    assertFalse(
+        data.usedTypes.contains("data.items.map"),
+        "Should not misclassify a data chain as a package. Found: " + data.usedTypes);
   }
 
   @Test
@@ -379,6 +446,64 @@ public class KtParserTest {
     assertTrue(
         data.exportedTypes.contains("java.util.ArrayList"),
         "Should detect ArrayList from inline function: " + data.exportedTypes);
+  }
+
+  @Test
+  public void nestedImportsAliasesAndJvmDefaults() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("ImportAliases.kt"));
+
+    assertTrue(
+        data.usedTypes.containsAll(
+            Set.of(
+                "com.example.api.Outer",
+                "com.example.api.Outer.SignRequest",
+                "com.example.alias.Outer",
+                "com.example.alias.Outer.Nested",
+                "com.example.deep.Outer",
+                "com.example.deep.Outer.Middle.Deep")));
+    assertTrue(
+        data.exportedTypes.containsAll(
+            Set.of(
+                "com.example.api.Outer.SignRequest",
+                "com.example.alias.Outer",
+                "com.example.deep.Outer.Middle.Deep")));
+    assertFalse(
+        data.usedTypes.stream()
+            .anyMatch(
+                type ->
+                    type.startsWith("proto.")
+                        || type.startsWith("Namespace.")
+                        || type.endsWith(".SignRequest") && type.startsWith("workspace.")));
+
+    String samePackage = "workspace.com.gazelle.kotlin.javaparser.generators.";
+    for (String defaultType :
+        Set.of("Class", "Math", "Suppress", "System", "Thread", "Throws", "Void")) {
+      assertFalse(data.usedTypes.contains(samePackage + defaultType));
+      assertFalse(data.exportedTypes.contains(samePackage + defaultType));
+    }
+  }
+
+  @Test
+  public void ownCapitalizedPackageNamespaceIsNotAType() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("OwnPackageNamespace.kt"));
+    String ownPackage =
+        "workspace.com.gazelle.kotlin.javaparser.generators.queryengines.PaymentMethods";
+
+    assertTrue(data.packages.contains(ownPackage));
+    assertFalse(data.usedTypes.contains(ownPackage));
+    assertFalse(data.exportedTypes.contains(ownPackage));
+  }
+
+  @Test
+  public void defaultAnnotationTypesAreNotSamePackageDependencies() throws IOException {
+    ParsedPackageData data = parser.parseClasses(getPathsWithNames("DefaultAnnotations.kt"));
+
+    assertEquals(
+        Set.of(), data.usedTypes, "Default annotations must not resolve to the local package");
+    assertEquals(Set.of(), data.exportedTypes);
+    assertEquals(
+        Set.of("workspace.com.gazelle.kotlin.javaparser.generators.LocalAnnotation"),
+        data.declaredTypes);
   }
 
   private List<Path> getPathsWithNames(String... names) throws IOException {

@@ -37,6 +37,11 @@ const (
 	// Can be either "package" or "module". Defaults to "package".
 	JavaModuleGranularityDirective = "java_module_granularity"
 
+	// JavaKotlinModuleName declares the logical Kotlin module shared by generated
+	// kt_jvm_library targets below this package. It is independent of Bazel package
+	// and source-ownership boundaries and is inherited by child packages.
+	JavaKotlinModuleName = "java_kotlin_module_name"
+
 	// JavaTestFileSuffixes indicates within a test directory which files are test classes vs utility classes,
 	// based on their basename.
 	// It should be set up to match the value used for java_test_suite's test_suffixes attribute.
@@ -150,6 +155,7 @@ func (c *Config) NewChild() *Config {
 		mavenInstallFile:       c.mavenInstallFile,
 		mavenIndexFile:         c.mavenIndexFile,
 		moduleGranularity:      c.moduleGranularity,
+		kotlinModuleName:       c.kotlinModuleName,
 		repoRoot:               c.repoRoot,
 		testMode:               c.testMode,
 		customTestFileSuffixes: c.customTestFileSuffixes,
@@ -190,6 +196,7 @@ type Config struct {
 	mavenInstallFile                                   string
 	mavenIndexFile                                     string
 	moduleGranularity                                  string
+	kotlinModuleName                                   string
 	repoRoot                                           string
 	testMode                                           string
 	customTestFileSuffixes                             *[]string
@@ -337,16 +344,25 @@ func (c *Config) SetModuleGranularity(granularity string) error {
 		return fmt.Errorf("%s: possible values are module/package/scc", granularity)
 	}
 
-	// Both "module" (one coarse target) and "scc" (minimal fine-grained targets) aggregate
-	// the whole subtree at the topmost directory that enables them.
-	if granularity == "module" || granularity == "scc" {
-		if c.parent == nil || c.parent.moduleGranularity == "package" {
-			c.isModuleRoot = true
-		}
-	}
+	// NewChild copies granularity without calling this setter, so every explicit module/scc
+	// directive marks a root. This makes a nested explicit directive a real boundary even
+	// when its parent also aggregates at module granularity.
+	c.isModuleRoot = granularity == "module" || granularity == "scc"
 
 	c.moduleGranularity = granularity
 
+	return nil
+}
+
+func (c Config) KotlinModuleName() string {
+	return c.kotlinModuleName
+}
+
+func (c *Config) SetKotlinModuleName(name string) error {
+	if name == "" || strings.TrimSpace(name) != name || strings.ContainsAny(name, " \t\r\n") {
+		return fmt.Errorf("%q: Kotlin module name must be a non-empty value without whitespace", name)
+	}
+	c.kotlinModuleName = name
 	return nil
 }
 

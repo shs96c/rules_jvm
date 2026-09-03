@@ -1,2 +1,14 @@
 # gazelle:java_module_granularity scc
 # gazelle:jvm_kotlin_enabled false
+
+java_library(
+    name = "removed",
+    srcs = ["removed/Removed.java"],
+    deps = ["//removed"],
+)
+
+java_library(
+    name = "old_solo",
+    srcs = ["solo/Solo.java"],
+    deps = ["//old_solo"],
+)

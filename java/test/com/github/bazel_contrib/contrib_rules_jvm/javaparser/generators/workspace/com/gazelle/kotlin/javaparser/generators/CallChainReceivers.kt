@@ -1,7 +1,12 @@
 package workspace.com.gazelle.kotlin.javaparser.generators
 
 class CallChainReceivers {
-  fun demo() {
+  fun demo(parameterReceiver: Receiver) {
+    okio.Buffer()
+    val localReceiver = parameterReceiver
+    localReceiver.Buffer()
+    parameterReceiver.Buffer()
+    localReceiver.let { it.Buffer() }
     // Call chain: the receiver of the final `.Bar()` selector is `Value.foo(1)`,
     // whose text contains a `.` but is not a fully-qualified identifier (parens).
     // Must not be recorded as a class reference.

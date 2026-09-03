@@ -20,6 +20,18 @@ func TestIsStdLib(t *testing.T) {
 		// kotlin.testing is a distinct package that still lives under kotlin, so the
 		// kotlin.test exclusion must not match it on a bare string prefix.
 		"kotlin.testing": true,
+		// kotlin.metadata ships as a separate artifact, so it is not stdlib.
+		"kotlin.metadata":     false,
+		"kotlin.metadata.jvm": false,
+		// kotlin.metadatas is a distinct package that still lives under kotlin, so the
+		// kotlin.metadata exclusion must not match it on a bare string prefix.
+		"kotlin.metadatas": true,
+		// kotlin.reflect ships as a separate artifact, so it is not stdlib.
+		"kotlin.reflect":      false,
+		"kotlin.reflect.full": false,
+		// kotlin.reflects is a distinct package that still lives under kotlin, so the
+		// kotlin.reflect exclusion must not match it on a bare string prefix.
+		"kotlin.reflects": true,
 	}
 
 	for pkg, want := range tests {

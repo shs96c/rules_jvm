@@ -1,6 +1,8 @@
 package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.AdditionalAnswers.delegatesTo;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -196,7 +198,7 @@ public class ClasspathParserTest {
             testFiles.get("/workspace/com/gazelle/java/javaparser/generators/WildcardImport.java"));
     ParsedPackageData data = parser.parseClasses(files);
 
-    assertEquals(Set.of(), data.usedTypes);
+    assertEquals(Set.of("com.google.protobuf.JsonFormat"), data.usedTypes);
     assertEquals(Set.of("com.google.common.primitives"), data.usedPackagesWithoutSpecificTypes);
   }
 
@@ -507,10 +509,28 @@ public class ClasspathParserTest {
   }
 
   @Test
+  public void testLowercaseLocalMemberReceiversAreNotTypes() throws IOException {
+    List<? extends JavaFileObject> files =
+        List.of(
+            testFiles.get(
+                "/workspace/com/gazelle/java/javaparser/generators/MethodReceiverTypes.java"));
+    ParsedPackageData data = parser.parseClasses(files);
+
+    assertEquals(
+        Set.of(
+            "Outer.Inner",
+            "com.example.ImportedOuter",
+            "com.example.UUID",
+            "com.example.Utility",
+            "workspace.com.gazelle.java.javaparser.generators.SamePackageHelper"),
+        data.usedTypes);
+    assertFalse(data.usedTypes.contains("jsonResp.TransmissionResults"));
+    assertFalse(data.usedTypes.contains("record.AddressLine1"));
+  }
+
+  @Test
   public void testStaticImportNestedClass() throws IOException {
-    // Static imports register only the parent class in `usedTypes` but don't
-    // put the nested class name into `currentFileImports`. So a bare reference to
-    // `Inner` as a type resolves via same-package fallback instead of the import.
+    // Explicit static imports make nested types available as bare type owners.
     List<? extends JavaFileObject> files =
         List.of(
             testFiles.get(
@@ -519,7 +539,22 @@ public class ClasspathParserTest {
 
     // Should contain the nested class FQN from the static import, not a
     // same-package fallback like workspace.com.gazelle...Inner
-    assertEquals(Set.of("com.example.Outer", "com.example.Outer.Inner"), data.usedTypes);
+    assertEquals(
+        Set.of("com.example.Outer", "com.example.Outer.Inner", "com.example.Outer.android_process"),
+        data.usedTypes);
+  }
+
+  @Test
+  public void testLowercaseLocalNestedOwner() throws IOException {
+    List<? extends JavaFileObject> files =
+        List.of(
+            testFiles.get(
+                "/workspace/com/gazelle/java/javaparser/generators/LowercaseLocalNestedOwner.java"));
+    ParsedPackageData data = parser.parseClasses(files);
+
+    assertTrue(
+        data.usedTypes.contains("workspace.com.gazelle.java.javaparser.generators.es2_test"));
+    assertFalse(data.usedTypes.contains("es2_test.Builder"));
   }
 
   @Test

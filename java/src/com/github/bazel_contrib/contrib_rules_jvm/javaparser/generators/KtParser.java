@@ -1,12 +1,14 @@
 package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
 import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassName;
+import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassNameInImportPath;
 
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.vfs.VirtualFileManager;
 import com.intellij.psi.PsiManager;
 import com.intellij.psi.tree.IElementType;
+import com.intellij.psi.util.PsiTreeUtil;
 import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -16,6 +18,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.Stack;
 import java.util.TreeSet;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.jetbrains.kotlin.cli.jvm.compiler.EnvironmentConfigFiles;
@@ -28,6 +31,7 @@ import org.jetbrains.kotlin.name.FqNamesUtilKt;
 import org.jetbrains.kotlin.name.Name;
 import org.jetbrains.kotlin.name.NameUtils;
 import org.jetbrains.kotlin.psi.KtAnnotated;
+import org.jetbrains.kotlin.psi.KtAnnotationEntry;
 import org.jetbrains.kotlin.psi.KtBinaryExpression;
 import org.jetbrains.kotlin.psi.KtCallExpression;
 import org.jetbrains.kotlin.psi.KtClass;
@@ -66,6 +70,8 @@ public class KtParser {
   // text with parentheses (a call chain) so we don't record `foo(x).bar(y).Baz` as an FQN.
   private static final Pattern QUALIFIED_NAME =
       Pattern.compile("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+");
+  private static final Pattern FILE_JVM_NAME =
+      Pattern.compile("JvmName\\(\\s*\"([A-Za-z_$][A-Za-z0-9_$]*)\"\\s*\\)");
 
   private final CompilerConfiguration compilerConf = createCompilerConfiguration();
   private final KotlinCoreEnvironment env =
@@ -100,6 +106,8 @@ public class KtParser {
       ktFile.accept(visitor);
     }
 
+    visitor.packageData.usedTypes.removeAll(visitor.packageData.packages);
+    visitor.packageData.exportedTypes.removeAll(visitor.packageData.packages);
     return visitor.packageData;
   }
 
@@ -160,6 +168,17 @@ public class KtParser {
           "Lazy",
           "Pair",
           "Triple",
+          // Kotlin/JVM default imports
+          "Class",
+          "Math",
+          "System",
+          "Thread",
+          "Throws",
+          "Suppress",
+          "Void",
+          // kotlin.annotation
+          "Retention",
+          "Target",
           // kotlin.collections
           "Collection",
           "MutableCollection",
@@ -215,9 +234,7 @@ public class KtParser {
     @Override
     public void visitKtFile(KtFile file) {
       if (file.hasTopLevelCallables()) {
-        FqName filePackage = file.getPackageFqName();
-        String outerClassName = NameUtils.getScriptNameForFile(file.getName()) + "Kt";
-        FqName outerClassFqName = filePackage.child(Name.identifier(outerClassName));
+        FqName outerClassFqName = javaClassNameForKtFile(file);
         packageData.perClassData.put(outerClassFqName.toString(), new PerClassData());
       }
       super.visitKtFile(file);
@@ -235,27 +252,25 @@ public class KtParser {
       List<Name> pathSegments = importName.pathSegments();
       for (Name importPart : pathSegments) {
         segmentCount++;
-        // If there is a PascalCase component, assume it's a class.
-        if (isLikelyClassName(importPart.asString())) {
+        // If there is a class-like component, treat that prefix as the outer type.
+        if (isLikelyClassNameInImportPath(
+            importPart.asString(), segmentCount < pathSegments.size())) {
           foundClass = true;
           break;
         }
       }
       if (foundClass) {
-        FqName className = importName;
-        // Walk up to the outermost class-like segment. A deeply nested member import
-        // (e.g. clientsync/ktranslate StringResources.foo.bar.baz) names a member nested
-        // under a class, so the resolvable type is the longest prefix ending in a class
-        // segment -- not just the immediate parent, which would leave a phantom package.
-        while (!className.isRoot() && !isLikelyClassName(className.shortName().asString())) {
-          className = className.parent();
-        }
+        FqName className =
+            new FqName(
+                pathSegments.subList(0, segmentCount).stream()
+                    .map(Name::asString)
+                    .collect(Collectors.joining(".")));
         String localName = importDirective.getAliasName();
         if (localName == null) {
-          localName = className.shortName().toString();
+          localName = importName.shortName().toString();
         }
         packageData.usedTypes.add(className.toString());
-        fqImportByNameOrAlias.put(localName, className.toString());
+        fqImportByNameOrAlias.put(localName, importName.toString());
       } else {
         if (importDirective.isAllUnder()) {
           // If it's a wildcard import with no obvious class name, assume it's a package.
@@ -437,7 +452,13 @@ public class KtParser {
           FqName relativeFqName =
               packageRelativeName(object.getFqName(), object.getContainingKtFile());
           if (isJvmStatic(function)) {
-            packageData.mainClasses.add(relativeFqName.parent().toString());
+            // A companion's static main is emitted on its containing class. A named object's
+            // static main is emitted on the object itself; taking parent() there produces
+            // FqName.ROOT and Gazelle generates a binary named "<root>".
+            packageData.mainClasses.add(
+                object.isCompanion()
+                    ? relativeFqName.parent().toString()
+                    : relativeFqName.asString());
           } else {
             packageData.mainClasses.add(relativeFqName.asString());
           }
@@ -643,12 +664,17 @@ public class KtParser {
 
           checkExtensionFunctionCall(receiverType, functionName);
 
+          String resolvedReceiver = resolveImportedExpressionReceiver(receiverExpression);
           // FQN constructor / static call: com.example.ClassName(args) or
           // com.example.ClassName.fn() — when the call's name is a class-like
           // identifier and the receiver is a dotted identifier chain (not an arbitrary
           // call chain like `foo(x).bar(y)`), record the full qualified type.
-          if (isLikelyClassName(functionName) && isQualifiedName(receiverExpression.getText())) {
-            packageData.usedTypes.add(receiverExpression.getText() + "." + functionName);
+          if (isLikelyClassName(functionName)
+              && isPackageQualifiedTypeReceiver(receiverExpression, resolvedReceiver)) {
+            packageData.usedTypes.add(resolvedReceiver + "." + functionName);
+          } else if (isLowerCaseIdentifier(functionName)
+              && isPackageQualifiedFunctionReceiver(receiverExpression, resolvedReceiver)) {
+            packageData.usedTypes.add(resolvedReceiver + "." + functionName);
           }
         }
 
@@ -662,10 +688,10 @@ public class KtParser {
         // is parsed as outer-DQE(receiver=com.example.ClassName, selector=staticMethod()),
         // and the inner DQE here has receiver=com.example, selector=ClassName.
         String selectorName = ((KtSimpleNameExpression) selectorExpression).getReferencedName();
+        String resolvedReceiver = resolveImportedExpressionReceiver(receiverExpression);
         if (isLikelyClassName(selectorName)
-            && receiverExpression != null
-            && isQualifiedName(receiverExpression.getText())) {
-          packageData.usedTypes.add(receiverExpression.getText() + "." + selectorName);
+            && isPackageQualifiedTypeReceiver(receiverExpression, resolvedReceiver)) {
+          packageData.usedTypes.add(resolvedReceiver + "." + selectorName);
         }
       }
 
@@ -779,18 +805,9 @@ public class KtParser {
 
     /** Resolve a type name to its fully qualified name using imports. */
     private String resolveTypeToFqName(String typeName) {
-      // Try to resolve using imports
-      if (fqImportByNameOrAlias.containsKey(typeName)) {
-        return fqImportByNameOrAlias.get(typeName);
-      }
-
-      // If it's already fully qualified, return as-is
-      if (typeName.contains(".")) {
-        return typeName;
-      }
-
-      // For unresolved types, return null
-      return null;
+      return TypeNameResolver.resolve(
+              typeName, fqImportByNameOrAlias, null, KOTLIN_WELL_KNOWN_TYPES)
+          .orElse(null);
     }
 
     /** Get statistics about destructuring declarations detected during parsing. */
@@ -1011,9 +1028,13 @@ public class KtParser {
     private Optional<String> tryGetFullyQualifiedName(KtTypeElement typeElement) {
       if (typeElement instanceof KtUserType) {
         KtUserType userType = (KtUserType) typeElement;
-        // FQN type with a qualifier chain (e.g. com.example.Foo): walk the chain.
+        // FQN-shaped and alias-qualified types share the resolver so a leading alias wins.
         if (userType.getQualifier() != null) {
-          return Optional.of(reconstructQualifiedName(userType));
+          return TypeNameResolver.resolve(
+              reconstructQualifiedName(userType),
+              fqImportByNameOrAlias,
+              null,
+              KOTLIN_WELL_KNOWN_TYPES);
         }
         String identifier = userType.getReferencedName();
         if (fqImportByNameOrAlias.containsKey(identifier)) {
@@ -1054,9 +1075,120 @@ public class KtParser {
       return String.join(".", parts);
     }
 
+    private String resolveImportedExpressionReceiver(KtExpression receiverExpression) {
+      if (receiverExpression == null) {
+        return null;
+      }
+      String receiver = receiverExpression.getText();
+      int firstDot = receiver.indexOf('.');
+      String firstSegment = firstDot == -1 ? receiver : receiver.substring(0, firstDot);
+      String importedReceiver = fqImportByNameOrAlias.get(firstSegment);
+      if (importedReceiver == null) {
+        return receiver;
+      }
+      if (firstDot == -1) {
+        return importedReceiver;
+      }
+      return importedReceiver + receiver.substring(firstDot);
+    }
+
+    private boolean isPackageQualifiedFunctionReceiver(
+        KtExpression receiverExpression, String resolvedReceiver) {
+      if (resolvedReceiver == null || !isQualifiedName(resolvedReceiver)) {
+        return false;
+      }
+      for (String segment : resolvedReceiver.split("\\.")) {
+        if (!isLowerCaseIdentifier(segment)) {
+          return false;
+        }
+      }
+
+      String receiver = receiverExpression.getText();
+      int firstDot = receiver.indexOf('.');
+      String firstSegment = firstDot == -1 ? receiver : receiver.substring(0, firstDot);
+      KtFile file = receiverExpression.getContainingKtFile();
+      String containingPackage = file.getPackageFqName().asString();
+      int packageFirstDot = containingPackage.indexOf('.');
+      String packageFirstSegment =
+          packageFirstDot == -1
+              ? containingPackage
+              : containingPackage.substring(0, packageFirstDot);
+      if (!firstSegment.equals(packageFirstSegment)) {
+        return false;
+      }
+      if ("this".equals(firstSegment)
+          || "super".equals(firstSegment)
+          || "it".equals(firstSegment)
+          || fqImportByNameOrAlias.containsKey(firstSegment)) {
+        return false;
+      }
+
+      return PsiTreeUtil.findChildrenOfType(file, KtProperty.class).stream()
+              .noneMatch(property -> firstSegment.equals(property.getName()))
+          && PsiTreeUtil.findChildrenOfType(file, KtParameter.class).stream()
+              .noneMatch(parameter -> firstSegment.equals(parameter.getName()))
+          && PsiTreeUtil.findChildrenOfType(file, KtDestructuringDeclarationEntry.class).stream()
+              .noneMatch(entry -> firstSegment.equals(entry.getName()));
+    }
+
+    private boolean isLowerCaseIdentifier(String name) {
+      return name != null
+          && !name.isEmpty()
+          && Character.isLowerCase(name.codePointAt(0))
+          && name.chars().allMatch(c -> Character.isLetterOrDigit(c) || c == '_');
+    }
+
+    private boolean isPackageQualifiedTypeReceiver(
+        KtExpression receiverExpression, String resolvedReceiver) {
+      if (resolvedReceiver == null) {
+        return false;
+      }
+      if (isQualifiedName(resolvedReceiver)) {
+        return true;
+      }
+      if (!(receiverExpression instanceof KtSimpleNameExpression)
+          || resolvedReceiver.isEmpty()
+          || !Character.isLowerCase(resolvedReceiver.codePointAt(0))
+          || !resolvedReceiver.chars().allMatch(c -> Character.isLetterOrDigit(c) || c == '_')) {
+        return false;
+      }
+
+      String receiverName = ((KtSimpleNameExpression) receiverExpression).getReferencedName();
+      if ("it".equals(receiverName)) {
+        return false;
+      }
+      if (!resolvedReceiver.equals(receiverName)
+          || fqImportByNameOrAlias.containsKey(receiverName)) {
+        return false;
+      }
+      KtFile file = receiverExpression.getContainingKtFile();
+      return PsiTreeUtil.findChildrenOfType(file, KtProperty.class).stream()
+              .noneMatch(property -> receiverName.equals(property.getName()))
+          && PsiTreeUtil.findChildrenOfType(file, KtParameter.class).stream()
+              .noneMatch(parameter -> receiverName.equals(parameter.getName()))
+          && PsiTreeUtil.findChildrenOfType(file, KtDestructuringDeclarationEntry.class).stream()
+              .noneMatch(entry -> receiverName.equals(entry.getName()));
+    }
+
     private FqName javaClassNameForKtFile(KtFile file) {
       FqName filePackage = file.getPackageFqName();
-      String outerClassName = NameUtils.getScriptNameForFile(file.getName()) + "Kt";
+      String outerClassName =
+          file.getFileAnnotationList() == null
+              ? null
+              : file.getFileAnnotationList().getAnnotationEntries().stream()
+                  .filter(
+                      annotation ->
+                          annotation.getShortName() != null
+                              && annotation.getShortName().asString().equals("JvmName"))
+                  .map(KtAnnotationEntry::getText)
+                  .map(FILE_JVM_NAME::matcher)
+                  .filter(Matcher::find)
+                  .map(matcher -> matcher.group(1))
+                  .findFirst()
+                  .orElse(null);
+      if (outerClassName == null) {
+        outerClassName = NameUtils.getScriptNameForFile(file.getName()) + "Kt";
+      }
       return filePackage.child(Name.identifier(outerClassName));
     }
 
