@@ -112,6 +112,8 @@ The Java plugin for Gazelle adds the following flags to the command line options
 Java sources are parsed with JavaParser, with javac as a fallback for unsupported syntax.
 Prefetched results live only for the current run and are reused only when Gazelle selects
 exactly the same Java files. Kotlin and mixed-language packages use the ordinary parser path.
+Kotlin requests reuse one compiler environment per parser server and are serialised, with
+fresh metadata for each request. No results are retained between runs.
 
 ## Directives
 

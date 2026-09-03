@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,15 +42,17 @@ public class GrpcServer {
   private final Path serverPortFilePath;
   private final TimeoutHandler timeoutHandler;
   private final Server server;
+  private final GrpcService service;
 
   /** Create a BuildFileGenerator server using serverBuilder as a base and features as data. */
   public GrpcServer(Path serverPortFilePath, Path workspace, TimeoutHandler timeoutHandler) {
     this.serverPortFilePath = serverPortFilePath;
     this.timeoutHandler = timeoutHandler;
+    this.service = new GrpcService(workspace, timeoutHandler);
     ServerBuilder serverBuilder = ServerBuilder.forPort(0);
     this.server =
         serverBuilder
-            .addService(new GrpcService(workspace, timeoutHandler))
+            .addService(service)
             .addService(new LifecycleService())
             .addService(ProtoReflectionService.newInstance())
             .build();
@@ -82,7 +85,11 @@ public class GrpcServer {
 
   /** Stop serving requests and shutdown resources. */
   public void stop() throws InterruptedException {
-    server.shutdownNow().awaitTermination(30, TimeUnit.SECONDS);
+    try {
+      server.shutdownNow().awaitTermination(30, TimeUnit.SECONDS);
+    } finally {
+      service.close();
+    }
   }
 
   /** Await termination on the main thread since the grpc library uses daemon threads. */
@@ -90,16 +97,46 @@ public class GrpcServer {
     server.awaitTermination();
   }
 
-  static class GrpcService extends JavaParserGrpc.JavaParserImplBase {
+  static class GrpcService extends JavaParserGrpc.JavaParserImplBase implements AutoCloseable {
 
     private final Path workspace;
     private final TimeoutHandler timeoutHandler;
     private final ThreadLocal<JavaSourceParser> javaParser =
         ThreadLocal.withInitial(JavaSourceParser::new);
+    private final Supplier<KtParser> kotlinParserFactory;
+    private KtParser kotlinParser;
+    private boolean closed;
 
     GrpcService(Path workspace, TimeoutHandler timeoutHandler) {
+      this(workspace, timeoutHandler, KtParser::new);
+    }
+
+    GrpcService(
+        Path workspace, TimeoutHandler timeoutHandler, Supplier<KtParser> kotlinParserFactory) {
       this.workspace = workspace;
       this.timeoutHandler = timeoutHandler;
+      this.kotlinParserFactory = kotlinParserFactory;
+    }
+
+    // Kotlin's PSI environment is shared between requests, but is not thread-safe.
+    private synchronized ParsedPackageData parseKotlin(List<Path> files) {
+      if (closed) {
+        throw new IllegalStateException("Kotlin parser service is closed");
+      }
+      if (kotlinParser == null) {
+        kotlinParser = kotlinParserFactory.get();
+      }
+      return kotlinParser.parseClasses(files);
+    }
+
+    @Override
+    public synchronized void close() {
+      if (!closed) {
+        closed = true;
+        if (kotlinParser != null) {
+          kotlinParser.close();
+        }
+      }
     }
 
     @Override
@@ -170,8 +207,7 @@ public class GrpcServer {
       ParsedPackageData data = new ParsedPackageData();
       if (!kotlinFiles.isEmpty()) {
         try {
-          KtParser parser = new KtParser();
-          ParsedPackageData kotlinData = parser.parseClasses(kotlinFiles);
+          ParsedPackageData kotlinData = parseKotlin(kotlinFiles);
           data.merge(kotlinData);
         } catch (Exception ex) {
           logger.error("Error parsing Kotlin files", ex);

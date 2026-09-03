@@ -3,6 +3,7 @@ package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassName;
 import static com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators.ClassNames.isLikelyClassNameInImportPath;
 
+import com.intellij.openapi.Disposable;
 import com.intellij.openapi.util.Disposer;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.openapi.vfs.VirtualFileManager;
@@ -63,7 +64,7 @@ import org.jetbrains.kotlin.psi.KtUserType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class KtParser {
+public class KtParser implements AutoCloseable {
   private static final Logger logger = LoggerFactory.getLogger(GrpcServer.class);
 
   // Matches a dotted identifier chain -- letters/digits/underscores only. Rejects any receiver
@@ -73,14 +74,19 @@ public class KtParser {
   private static final Pattern FILE_JVM_NAME =
       Pattern.compile("JvmName\\(\\s*\"([A-Za-z_$][A-Za-z0-9_$]*)\"\\s*\\)");
 
+  private final Disposable disposable = Disposer.newDisposable();
   private final CompilerConfiguration compilerConf = createCompilerConfiguration();
   private final KotlinCoreEnvironment env =
       KotlinCoreEnvironment.createForProduction(
-          Disposer.newDisposable(), compilerConf, EnvironmentConfigFiles.JVM_CONFIG_FILES);
+          disposable, compilerConf, EnvironmentConfigFiles.JVM_CONFIG_FILES);
   private final VirtualFileManager vfm = VirtualFileManager.getInstance();
   private final PsiManager psiManager = PsiManager.getInstance(env.getProject());
+  private boolean closed;
 
   public ParsedPackageData parseClasses(List<Path> files) {
+    if (closed) {
+      throw new IllegalStateException("Kotlin parser is closed");
+    }
     KtFileVisitor visitor = new KtFileVisitor();
     List<VirtualFile> virtualFiles =
         files.stream().map(f -> vfm.findFileByNioPath(f)).collect(Collectors.toUnmodifiableList());
@@ -109,6 +115,14 @@ public class KtParser {
     visitor.packageData.usedTypes.removeAll(visitor.packageData.packages);
     visitor.packageData.exportedTypes.removeAll(visitor.packageData.packages);
     return visitor.packageData;
+  }
+
+  @Override
+  public void close() {
+    if (!closed) {
+      closed = true;
+      Disposer.dispose(disposable);
+    }
   }
 
   private static CompilerConfiguration createCompilerConfiguration() {

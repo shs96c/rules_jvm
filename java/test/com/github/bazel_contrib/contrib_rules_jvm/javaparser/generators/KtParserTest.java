@@ -3,6 +3,7 @@ package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
@@ -17,9 +18,11 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,6 +68,52 @@ public class KtParserTest {
   @BeforeEach
   public void setupPerTest() {
     parser = new KtParser();
+  }
+
+  @AfterEach
+  public void closeParser() {
+    parser.close();
+  }
+
+  @Test
+  public void reusedParserKeepsPackagesAndImportsIsolated(@TempDir Path root) throws IOException {
+    Path first = Files.createDirectories(root.resolve("first")).resolve("Example.kt");
+    Path second = Files.createDirectories(root.resolve("second")).resolve("Example.kt");
+    Files.writeString(
+        first, "package first\nimport external.First\nclass Example(val value: First)");
+    Files.writeString(
+        second, "package second\nimport external.Second\nclass Example(val value: Second)");
+    ParsedPackageData firstData = parser.parseClasses(List.of(first));
+    ParsedPackageData secondData = parser.parseClasses(List.of(second));
+    ParsedPackageData repeated = parser.parseClasses(List.of(first));
+
+    assertEquals(Set.of("first"), firstData.packages);
+    assertEquals(Set.of("second"), secondData.packages);
+    assertTrue(firstData.usedTypes.contains("external.First"));
+    assertFalse(firstData.usedTypes.contains("external.Second"));
+    assertTrue(secondData.usedTypes.contains("external.Second"));
+    assertFalse(secondData.usedTypes.contains("external.First"));
+    assertEquals(firstData.packages, repeated.packages);
+    assertEquals(firstData.usedTypes, repeated.usedTypes);
+    assertEquals(firstData.declaredTypes, repeated.declaredTypes);
+    assertEquals(firstData.exportedTypes, repeated.exportedTypes);
+    assertEquals(firstData.perClassData.keySet(), repeated.perClassData.keySet());
+  }
+
+  @Test
+  public void failedRequestDoesNotPoisonReusedParser(@TempDir Path root) throws IOException {
+    assertThrows(
+        RuntimeException.class, () -> parser.parseClasses(List.of(root.resolve("Missing.kt"))));
+    Path valid = root.resolve("Valid.kt");
+    Files.writeString(valid, "package valid\nclass Valid");
+    assertEquals(Set.of("valid.Valid"), parser.parseClasses(List.of(valid)).declaredTypes);
+  }
+
+  @Test
+  public void closedParserRejectsFurtherRequests() {
+    parser.close();
+    parser.close();
+    assertThrows(IllegalStateException.class, () -> parser.parseClasses(List.of()));
   }
 
   @Test
