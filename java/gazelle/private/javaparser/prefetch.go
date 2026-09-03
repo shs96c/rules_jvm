@@ -50,13 +50,12 @@ func (r *Runner) StartPrefetch(repoRoot string, roots []SourceRoot, batchSize in
 		jobs := make(chan []*pb.ParsePackageRequest)
 		var workers sync.WaitGroup
 		var mu sync.Mutex
-		for i := 0; i < min(4, (len(packages)+batchSize-1)/batchSize); i++ {
+		for i := 0; i < min(max(1, cap(r.parserSlots)), (len(packages)+batchSize-1)/batchSize); i++ {
 			workers.Add(1)
 			go func() {
 				defer workers.Done()
 				for batch := range jobs {
-					response, err := r.rpc.ParseJavaPackages(context.Background(),
-						&pb.ParseJavaPackagesRequest{Packages: batch}, grpc.MaxCallRecvMsgSize(64<<20))
+					response, err := r.parseBatch(context.Background(), batch)
 					if err != nil {
 						r.logger.Debug().Err(err).Msg("Java batch will be parsed on demand")
 						continue
@@ -104,7 +103,45 @@ func (r Runner) parsePackage(ctx context.Context, request *pb.ParsePackageReques
 			}
 		}
 	}
+	return r.parseOnDemand(ctx, request)
+}
+
+func (r Runner) acquireParser(ctx context.Context) error {
+	if r.parserSlots == nil {
+		return nil
+	}
+	select {
+	case r.parserSlots <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (r Runner) releaseParser() {
+	if r.parserSlots != nil {
+		<-r.parserSlots
+	}
+}
+
+func (r Runner) parseOnDemand(ctx context.Context, request *pb.ParsePackageRequest) (*pb.Package, error) {
+	if err := r.acquireParser(ctx); err != nil {
+		return nil, err
+	}
+	defer r.releaseParser()
 	return r.rpc.ParsePackage(ctx, request)
+}
+
+func (r Runner) parseBatch(ctx context.Context, batch []*pb.ParsePackageRequest) (*pb.ParseJavaPackagesResponse, error) {
+	if err := r.acquireParser(ctx); err != nil {
+		return nil, err
+	}
+	defer r.releaseParser()
+	started := time.Now()
+	defer func() {
+		r.logger.Debug().Int("packages", len(batch)).Dur("duration", time.Since(started)).Msg("Java batch parsed")
+	}()
+	return r.rpc.ParseJavaPackages(ctx, &pb.ParseJavaPackagesRequest{Packages: batch}, grpc.MaxCallRecvMsgSize(64<<20))
 }
 
 func (r Runner) keepParserAlive(ctx context.Context) error {
@@ -114,7 +151,7 @@ func (r Runner) keepParserAlive(ctx context.Context) error {
 		return nil
 	}
 	// Reusing metadata must not let the parser's idle timeout expire before an uncached request.
-	_, err := r.rpc.ParsePackage(ctx, &pb.ParsePackageRequest{})
+	_, err := r.parseOnDemand(ctx, &pb.ParsePackageRequest{})
 	return err
 }
 

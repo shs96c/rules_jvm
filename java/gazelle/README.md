@@ -105,7 +105,9 @@ The Java plugin for Gazelle adds the following flags to the command line options
 | java-maven-install-file                       | "maven_install.json"                                       |
 | Path of the maven_install.json file.                                                                       |
 | java-batch-size                               | 512                                                        |
-| Maximum Java packages per parser request. Four requests run concurrently; set to 0 to disable prefetch. |
+| Maximum Java packages per parser request; set to 0 to disable prefetch. |
+| java-parser-workers                           | 0                                                          |
+| Maximum concurrent parser requests. The default uses available logical CPUs, respecting affinity and inherited Linux container quotas. Results are retained only for the current run; rule generation and export finalisation keep their existing ordering. |
 
 Java sources are parsed with JavaParser, with javac as a fallback for unsupported syntax.
 Prefetched results live only for the current run and are reused only when Gazelle selects

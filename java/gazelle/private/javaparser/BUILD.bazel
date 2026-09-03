@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "javaparser",
     srcs = [
+        "cpus.go",
         "javaparser.go",
         "prefetch.go",
     ],
@@ -23,9 +24,12 @@ go_library(
 
 go_test(
     name = "javaparser_test",
+    size = "small",
     srcs = [
+        "cpus_test.go",
         "javaparser_test.go",
         "prefetch_test.go",
+        "scheduler_test.go",
     ],
     embed = [":javaparser"],
     deps = [

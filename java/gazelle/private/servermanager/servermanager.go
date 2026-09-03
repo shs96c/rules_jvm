@@ -18,6 +18,7 @@ import (
 type ServerManager struct {
 	workspace    string
 	javaLogLevel string
+	cpus         int
 	tmpdir       string
 
 	mu   sync.Mutex
@@ -29,7 +30,7 @@ type JavaparserLocator interface {
 	startupFlags(jvmFlags []string) []string
 }
 
-func New(workspace, javaLogLevel string) (*ServerManager, error) {
+func New(workspace, javaLogLevel string, cpus int) (*ServerManager, error) {
 	dir, err := os.MkdirTemp(os.Getenv("TMPDIR"), "gazelle-javaparser")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create tmpdir to start javaparser server: %w", err)
@@ -37,6 +38,7 @@ func New(workspace, javaLogLevel string) (*ServerManager, error) {
 	return &ServerManager{
 		workspace:    workspace,
 		javaLogLevel: javaLogLevel,
+		cpus:         cpus,
 		tmpdir:       dir,
 	}, nil
 }
@@ -52,6 +54,7 @@ func (m *ServerManager) Connect() (*grpc.ClientConn, error) {
 
 	jvmFlags := []string{
 		logLevelFlag,
+		fmt.Sprintf("-XX:ActiveProcessorCount=%d", m.cpus),
 	}
 
 	portFilePath := filepath.Join(m.tmpdir, "port")

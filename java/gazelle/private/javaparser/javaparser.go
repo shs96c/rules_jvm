@@ -20,10 +20,19 @@ type Runner struct {
 	rpc           pb.JavaParserClient
 	serverManager *servermanager.ServerManager
 	prefetch      *prefetch
+	parserSlots   chan struct{}
 }
 
-func NewRunner(logger zerolog.Logger, repoRoot string, javaLogLevel string) (*Runner, error) {
-	serverManager, err := servermanager.New(repoRoot, javaLogLevel)
+func NewRunner(logger zerolog.Logger, repoRoot string, javaLogLevel string, workers int) (*Runner, error) {
+	cpus := availableCPUs()
+	if workers == 0 {
+		workers = cpus
+	}
+	if workers < 1 {
+		return nil, fmt.Errorf("Java parser workers must be positive")
+	}
+	logger.Debug().Int("workers", workers).Int("cpus", cpus).Msg("Java parser concurrency")
+	serverManager, err := servermanager.New(repoRoot, javaLogLevel, cpus)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create javaparser server manager: %v", err)
 	}
@@ -37,6 +46,7 @@ func NewRunner(logger zerolog.Logger, repoRoot string, javaLogLevel string) (*Ru
 		logger:        logger.With().Str("_c", "javaparser").Logger(),
 		rpc:           pb.NewJavaParserClient(conn),
 		serverManager: serverManager,
+		parserSlots:   make(chan struct{}, workers),
 	}, nil
 }
 

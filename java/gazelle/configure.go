@@ -27,6 +27,7 @@ type Configurer struct {
 	mavenInstallFile      string
 	mavenIndexFile        string
 	javaBatchSize         int
+	javaParserWorkers     int
 	javaSourceRoots       []javaparser.SourceRoot
 }
 
@@ -40,6 +41,7 @@ func NewConfigurer(lang *javaLang) *Configurer {
 
 func (jc *Configurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
 	fs.IntVar(&jc.javaBatchSize, "java-batch-size", 512, "Maximum Java packages per parallel parser request; 0 disables prefetch.")
+	fs.IntVar(&jc.javaParserWorkers, "java-parser-workers", 0, "Maximum concurrent parser requests; 0 uses available CPUs, including container limits.")
 	fs.Var(&jc.annotationToAttribute, "java-annotation-to-attribute", "Mapping of annotations (on test classes) to attributes which should be set for that test rule. Examples: com.example.annotations.FlakyTest=flaky=True com.example.annotations.SlowTest=timeout=\"long\"")
 	fs.Var(&jc.annotationToWrapper, "java-annotation-to-wrapper", "Mapping of annotations (on test classes) to wrapper rules which should be used around the test rule. Example: com.example.annotations.RequiresNetwork=@some//wrapper:file.bzl=requires_network")
 	fs.StringVar(&jc.mavenInstallFile, "java-maven-install-file", "", "Path of the maven_install.json file. Defaults to \"maven_install.json\".")
@@ -47,6 +49,9 @@ func (jc *Configurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Conf
 }
 
 func (jc *Configurer) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
+	if jc.javaParserWorkers < 0 {
+		return fmt.Errorf("java-parser-workers must not be negative")
+	}
 	if jc.javaBatchSize < 0 {
 		return fmt.Errorf("java-batch-size must not be negative")
 	}
@@ -367,7 +372,7 @@ func (jc *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 	}
 
 	if jc.lang.parser == nil {
-		runner, err := javaparser.NewRunner(jc.lang.logger, c.RepoRoot, jc.lang.javaLogLevel)
+		runner, err := javaparser.NewRunner(jc.lang.logger, c.RepoRoot, jc.lang.javaLogLevel, jc.javaParserWorkers)
 		if err != nil {
 			jc.lang.logger.Fatal().Err(err).Msg("could not start javaparser")
 		}

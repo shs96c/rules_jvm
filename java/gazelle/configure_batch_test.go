@@ -69,3 +69,30 @@ func TestJavaBatchSizeMustNotBeNegative(t *testing.T) {
 		t.Fatal("negative batch size was accepted")
 	}
 }
+
+func TestJavaParserWorkerFlags(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		args      []string
+		want      int
+		wantError bool
+	}{
+		{"automatic", nil, 0, false},
+		{"override", []string{"-java-parser-workers=4"}, 4, false},
+		{"negative", []string{"-java-parser-workers=-1"}, -1, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := &config.Config{Exts: make(map[string]interface{})}
+			configurer := NewConfigurer(NewLanguage().(*javaLang))
+			fs := flag.NewFlagSet(test.name, flag.ContinueOnError)
+			configurer.RegisterFlags(fs, "update", c)
+			if err := fs.Parse(test.args); err != nil {
+				t.Fatal(err)
+			}
+			err := configurer.CheckFlags(fs, c)
+			if (err != nil) != test.wantError || configurer.javaParserWorkers != test.want {
+				t.Fatalf("workers = %d, error = %v", configurer.javaParserWorkers, err)
+			}
+		})
+	}
+}
