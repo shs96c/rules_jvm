@@ -35,6 +35,7 @@ java_library(
     name = "gazelle_java_build_v0_java_library",
     visibility = [
         "//java/src/com/github/bazel_contrib/contrib_rules_jvm/javaparser/generators:__pkg__",
+        "//java/test/com/github/bazel_contrib/contrib_rules_jvm/javaparser/generators:__pkg__",
     ],
     exports = [
         ":gazelle_java_build_v0_java_grpc",

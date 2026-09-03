@@ -11,6 +11,19 @@ option java_package = "com.gazelle.java.javaparser.v0";
 service JavaParser {
   // Parse a Java or Kotlin package.
   rpc ParsePackage(ParsePackageRequest) returns (Package) {}
+
+  // Speculatively parse independent Java packages, isolating failures.
+  rpc ParseJavaPackages(ParseJavaPackagesRequest) returns (ParseJavaPackagesResponse) {}
+}
+
+message ParseJavaPackagesRequest {
+  repeated ParsePackageRequest packages = 1;
+}
+
+message ParseJavaPackagesResponse {
+  // Both maps use the workspace-relative directory as their key.
+  map<string, Package> packages = 1;
+  map<string, string> errors = 2;
 }
 
 // GL request to BFG to get imports during the Generate phase.

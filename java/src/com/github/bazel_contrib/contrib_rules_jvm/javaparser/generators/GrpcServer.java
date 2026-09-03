@@ -5,6 +5,8 @@ import static java.nio.file.StandardCopyOption.ATOMIC_MOVE;
 import com.gazelle.java.javaparser.v0.JavaParserGrpc;
 import com.gazelle.java.javaparser.v0.Package;
 import com.gazelle.java.javaparser.v0.Package.Builder;
+import com.gazelle.java.javaparser.v0.ParseJavaPackagesRequest;
+import com.gazelle.java.javaparser.v0.ParseJavaPackagesResponse;
 import com.gazelle.java.javaparser.v0.ParsePackageRequest;
 import com.gazelle.java.javaparser.v0.PerClassMetadata;
 import com.gazelle.java.javaparser.v0.PerFieldMetadata;
@@ -88,7 +90,7 @@ public class GrpcServer {
     server.awaitTermination();
   }
 
-  private static class GrpcService extends JavaParserGrpc.JavaParserImplBase {
+  static class GrpcService extends JavaParserGrpc.JavaParserImplBase {
 
     private final Path workspace;
     private final TimeoutHandler timeoutHandler;
@@ -116,6 +118,32 @@ public class GrpcServer {
                 .asRuntimeException());
       } catch (Exception ex) {
         responseObserver.onError(ex);
+      } finally {
+        timeoutHandler.finishedRequest();
+      }
+    }
+
+    @Override
+    public void parseJavaPackages(
+        ParseJavaPackagesRequest request,
+        StreamObserver<ParseJavaPackagesResponse> responseObserver) {
+      timeoutHandler.startedRequest();
+      try {
+        var response = ParseJavaPackagesResponse.newBuilder();
+        for (ParsePackageRequest pkg : request.getPackagesList()) {
+          try {
+            if (pkg.getFilesList().stream().anyMatch(file -> !file.endsWith(".java"))) {
+              throw new IOException("Batch parsing only supports Java sources");
+            }
+            response.putPackages(pkg.getRel(), getImports(pkg));
+          } catch (Exception ex) {
+            // An excluded source may be malformed; ordinary parsing reports errors for selected
+            // files.
+            response.putErrors(pkg.getRel(), ex.toString());
+          }
+        }
+        responseObserver.onNext(response.build());
+        responseObserver.onCompleted();
       } finally {
         timeoutHandler.finishedRequest();
       }

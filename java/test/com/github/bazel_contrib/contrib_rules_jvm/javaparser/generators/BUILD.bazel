@@ -8,6 +8,7 @@ java_test_suite(
     srcs = [
         "ClassNamesTest.java",
         "ClasspathParserTest.java",
+        "GrpcServerTest.java",
         "JavaIdentifierTest.java",
         "KtParserTest.java",
         "TypeNameResolverTest.java",
@@ -27,9 +28,11 @@ java_test_suite(
         "@contrib_rules_jvm_deps//:org_junit_platform_junit_platform_reporting",
     ],
     deps = [
+        "//java/gazelle/private/javaparser/proto/gazelle/java/javaparser/v0:gazelle_java_build_v0_java_library",
         "//java/src/com/github/bazel_contrib/contrib_rules_jvm/javaparser/file",
         "//java/src/com/github/bazel_contrib/contrib_rules_jvm/javaparser/generators",
         "@contrib_rules_jvm_deps//:com_github_spotbugs_spotbugs_annotations",  # keep
+        "@contrib_rules_jvm_deps//:io_grpc_grpc_stub",
         "@contrib_rules_jvm_deps//:junit_junit",
         "@contrib_rules_jvm_deps//:org_junit_jupiter_junit_jupiter_api",
         "@contrib_rules_jvm_deps//:org_slf4j_slf4j_api",
