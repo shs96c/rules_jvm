@@ -104,9 +104,12 @@ The Java plugin for Gazelle adds the following flags to the command line options
   Example: com.example.annotations.RequiresNetwork=@some//wrapper:file.bzl=requires_network")                |
 | java-maven-install-file                       | "maven_install.json"                                       |
 | Path of the maven_install.json file.                                                                       |
-
+| java-batch-size                               | 512                                                        |
+| Maximum Java packages per parser request. Four requests run concurrently; set to 0 to disable prefetch. |
 
 Java sources are parsed with JavaParser, with javac as a fallback for unsupported syntax.
+Prefetched results live only for the current run and are reused only when Gazelle selects
+exactly the same Java files. Kotlin and mixed-language packages use the ordinary parser path.
 
 ## Directives
 

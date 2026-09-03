@@ -300,6 +300,7 @@ func (l javaLang) Fix(c *config.Config, f *rule.File) {
 
 func (l javaLang) DoneGeneratingRules() {
 	if l.parser != nil {
+		l.parser.WaitForPrefetch()
 		l.parser.ServerManager().Shutdown()
 	}
 	l.javaExportIndex.FinalizeIndex()

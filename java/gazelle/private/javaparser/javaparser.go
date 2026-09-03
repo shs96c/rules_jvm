@@ -19,6 +19,7 @@ type Runner struct {
 	logger        zerolog.Logger
 	rpc           pb.JavaParserClient
 	serverManager *servermanager.ServerManager
+	prefetch      *prefetch
 }
 
 func NewRunner(logger zerolog.Logger, repoRoot string, javaLogLevel string) (*Runner, error) {
@@ -56,7 +57,7 @@ func (r Runner) ParsePackage(ctx context.Context, in *ParsePackageRequest) (*jav
 			Msg("parse package done")
 	}(time.Now())
 
-	resp, err := r.rpc.ParsePackage(ctx, &pb.ParsePackageRequest{Rel: in.Rel, Files: in.Files})
+	resp, err := r.parsePackage(ctx, &pb.ParsePackageRequest{Rel: in.Rel, Files: in.Files})
 	if err != nil {
 		if grpcErr, ok := status.FromError(err); ok {
 			// gRPC is an implementation detail of the javaparser layer, and shouldn't be relied on by higher layers.

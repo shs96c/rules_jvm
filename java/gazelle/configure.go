@@ -26,6 +26,8 @@ type Configurer struct {
 	annotationToWrapper   annotationToWrapper
 	mavenInstallFile      string
 	mavenIndexFile        string
+	javaBatchSize         int
+	javaSourceRoots       []javaparser.SourceRoot
 }
 
 func NewConfigurer(lang *javaLang) *Configurer {
@@ -37,6 +39,7 @@ func NewConfigurer(lang *javaLang) *Configurer {
 }
 
 func (jc *Configurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
+	fs.IntVar(&jc.javaBatchSize, "java-batch-size", 512, "Maximum Java packages per parallel parser request; 0 disables prefetch.")
 	fs.Var(&jc.annotationToAttribute, "java-annotation-to-attribute", "Mapping of annotations (on test classes) to attributes which should be set for that test rule. Examples: com.example.annotations.FlakyTest=flaky=True com.example.annotations.SlowTest=timeout=\"long\"")
 	fs.Var(&jc.annotationToWrapper, "java-annotation-to-wrapper", "Mapping of annotations (on test classes) to wrapper rules which should be used around the test rule. Example: com.example.annotations.RequiresNetwork=@some//wrapper:file.bzl=requires_network")
 	fs.StringVar(&jc.mavenInstallFile, "java-maven-install-file", "", "Path of the maven_install.json file. Defaults to \"maven_install.json\".")
@@ -44,6 +47,16 @@ func (jc *Configurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Conf
 }
 
 func (jc *Configurer) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
+	if jc.javaBatchSize < 0 {
+		return fmt.Errorf("java-batch-size must not be negative")
+	}
+	if jc.javaBatchSize > 0 {
+		var err error
+		jc.javaSourceRoots, err = javaSourceRootsFromFlags(fs, c)
+		if err != nil {
+			return err
+		}
+	}
 	cfgs := jc.initRootConfig(c)
 	for annotation, kv := range jc.annotationToAttribute {
 		for k, v := range kv {
@@ -60,6 +73,45 @@ func (jc *Configurer) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 		cfgs[""].SetMavenIndexFile(jc.mavenIndexFile)
 	}
 	return nil
+}
+
+func javaSourceRootsFromFlags(fs *flag.FlagSet, c *config.Config) ([]javaparser.SourceRoot, error) {
+	recursiveFlag := fs.Lookup("r")
+	if recursiveFlag == nil {
+		return nil, nil
+	}
+	recursive := recursiveFlag.Value.(flag.Getter).Get().(bool)
+	repoRoot, err := filepath.EvalSymlinks(c.RepoRoot)
+	if err != nil {
+		return nil, err
+	}
+	args := fs.Args()
+	if len(args) == 0 {
+		args = []string{"."}
+	}
+	roots := make([]javaparser.SourceRoot, 0, len(args))
+	for _, arg := range args {
+		directory := arg
+		if !filepath.IsAbs(directory) {
+			directory = filepath.Join(c.WorkDir, directory)
+		}
+		directory, err = filepath.EvalSymlinks(directory)
+		if err != nil {
+			return nil, err
+		}
+		rel, err := filepath.Rel(repoRoot, directory)
+		if err != nil {
+			return nil, err
+		}
+		if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("Java source root %q is outside the repository", arg)
+		}
+		if rel == "." {
+			rel = ""
+		}
+		roots = append(roots, javaparser.SourceRoot{Rel: filepath.ToSlash(rel), Recursive: recursive})
+	}
+	return roots, nil
 }
 
 func (jc *Configurer) KnownDirectives() []string {
@@ -320,6 +372,7 @@ func (jc *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 			jc.lang.logger.Fatal().Err(err).Msg("could not start javaparser")
 		}
 		jc.lang.parser = runner
+		runner.StartPrefetch(c.RepoRoot, jc.javaSourceRoots, jc.javaBatchSize)
 	}
 
 	if jc.lang.mavenResolver == nil {
