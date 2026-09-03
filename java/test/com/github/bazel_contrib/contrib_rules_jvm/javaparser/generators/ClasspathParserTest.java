@@ -84,6 +84,105 @@ public class ClasspathParserTest {
   }
 
   @Test
+  public void javaParserPreservesJavacMetadata() throws IOException {
+    JavaSourceParser candidate = new JavaSourceParser();
+    for (JavaFileObject file : testFiles.values()) {
+      ParsedPackageData expected = parser.parseClasses(List.of(file));
+      ParsedPackageData actual = candidate.parseClasses(List.of(file));
+      String source = file.getName();
+      assertEquals(expected.packages, actual.packages, source + " packages");
+      assertEquals(expected.usedTypes, actual.usedTypes, source + " references");
+      assertEquals(
+          expected.usedPackagesWithoutSpecificTypes,
+          actual.usedPackagesWithoutSpecificTypes,
+          source + " wildcard imports");
+      assertEquals(expected.exportedTypes, actual.exportedTypes, source + " exports");
+      assertEquals(expected.declaredTypes, actual.declaredTypes, source + " declarations");
+      assertEquals(expected.mainClasses, actual.mainClasses, source + " main classes");
+      assertEquals(expected.perClassData, actual.perClassData, source + " annotations");
+    }
+  }
+
+  @Test
+  public void javaParserPreservesModernJavaMetadata(@TempDir Path directory) throws IOException {
+    Files.writeString(
+        directory.resolve("Modern.java"),
+        """
+        package sample;
+        import example.Marker;
+        record Modern(@Marker example.Component component) {
+          Modern {
+            var value = example.Factory.create();
+          }
+          Object method(Object input) {
+            var value = new example.Value();
+            if (input instanceof example.Pattern match) {
+              return match;
+            }
+            java.util.function.Function<example.Input, example.Output> f =
+                (@Marker var item) -> new example.Output();
+            return new example.Callback() {
+              @Marker public example.Result apply() { return null; }
+            };
+          }
+        }
+        enum Mode {
+          @Marker FIRST { @Marker public example.Result result() { return null; } };
+          public abstract example.Result result();
+        }
+        """);
+    ParsedPackageData expected = parser.parseClasses(directory, List.of("Modern.java"));
+    ParsedPackageData actual =
+        new JavaSourceParser().parseClasses(directory, List.of("Modern.java"));
+    Assertions.assertAll(
+        () -> assertEquals(expected.usedTypes, actual.usedTypes, "references"),
+        () -> assertEquals(expected.exportedTypes, actual.exportedTypes, "exports"),
+        () -> assertEquals(expected.declaredTypes, actual.declaredTypes, "declarations"),
+        () -> assertEquals(expected.perClassData, actual.perClassData, "annotations"));
+  }
+
+  @Test
+  public void javaParserPreservesMetadataForUnsupportedSyntax(@TempDir Path directory)
+      throws IOException {
+    for (String source :
+        List.of(
+            """
+            package sample;
+            class Example {
+              public example.Result run() {
+                enum LocalMode { FIRST }
+                return new example.Result();
+              }
+            }
+            """,
+            """
+            package sample;
+            @interface Example {
+              example.Result values()[];
+            }
+            """)) {
+      Files.writeString(directory.resolve("Example.java"), source);
+      ParsedPackageData expected = parser.parseClasses(directory, List.of("Example.java"));
+      ParsedPackageData actual =
+          new JavaSourceParser().parseClasses(directory, List.of("Example.java"));
+      Assertions.assertAll(
+          () -> assertEquals(expected.packages, actual.packages),
+          () -> assertEquals(expected.usedTypes, actual.usedTypes),
+          () -> assertEquals(expected.exportedTypes, actual.exportedTypes),
+          () -> assertEquals(expected.declaredTypes, actual.declaredTypes),
+          () -> assertEquals(expected.perClassData, actual.perClassData));
+    }
+  }
+
+  @Test
+  public void javaParserReportsMalformedSources(@TempDir Path directory) throws IOException {
+    Files.writeString(directory.resolve("Broken.java"), "class Broken { void method( }");
+    Assertions.assertThrows(
+        IOException.class,
+        () -> new JavaSourceParser().parseClasses(directory, List.of("Broken.java")));
+  }
+
+  @Test
   public void simpleTest() throws IOException {
     List<? extends JavaFileObject> files =
         List.of(testFiles.get("/workspace/com/gazelle/java/javaparser/generators/Main.java"));

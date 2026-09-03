@@ -7,6 +7,7 @@ java_library(
         "ClasspathParser.java",
         "GrpcServer.java",
         "JavaIdentifier.java",
+        "JavaSourceParser.java",
         "KtParser.java",
         "LifecycleService.java",
         "Main.java",
@@ -23,6 +24,7 @@ java_library(
     ],
     deps = [
         "//java/gazelle/private/javaparser/proto/gazelle/java/javaparser/v0:gazelle_java_build_v0_java_library",
+        "@contrib_rules_jvm_deps//:com_github_javaparser_javaparser_core",
         "@contrib_rules_jvm_deps//:com_google_code_findbugs_jsr305",
         "@contrib_rules_jvm_deps//:com_google_errorprone_error_prone_annotations",
         "@contrib_rules_jvm_deps//:com_google_guava_guava",

@@ -42,6 +42,8 @@ import java.util.TreeSet;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 import javax.lang.model.type.TypeKind;
+import javax.tools.Diagnostic;
+import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
 import javax.tools.JavaFileObject;
 import javax.tools.StandardJavaFileManager;
@@ -52,7 +54,7 @@ import org.slf4j.LoggerFactory;
 public class ClasspathParser {
   private static final Logger logger = LoggerFactory.getLogger(ClasspathParser.class);
 
-  private static final Set<String> JAVA_LANG_TYPES =
+  static final Set<String> JAVA_LANG_TYPES =
       Set.of(
           // Primitive wrappers
           "Boolean",
@@ -195,7 +197,9 @@ public class ClasspathParser {
   private ParsedPackageData parseFileGatherDependencies(
       JavaCompiler compiler, Iterable<? extends JavaFileObject> compUnits) throws IOException {
     ParsedPackageData data = new ParsedPackageData();
-    JavacTask task = (JavacTask) compiler.getTask(null, null, null, OPTIONS, null, compUnits);
+    DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+    JavacTask task =
+        (JavacTask) compiler.getTask(null, null, diagnostics, OPTIONS, null, compUnits);
     try {
       ClassScanner scanner = new ClassScanner(data);
       for (CompilationUnitTree compileUnitTree : task.parse()) {
@@ -205,7 +209,12 @@ public class ClasspathParser {
       logger.error("JavaTools unable to read file(s)", ioException);
       throw ioException;
     } catch (Exception exception) {
-      logger.error("JavaTools failed to parse {}, skipping file", compUnits, exception);
+      throw new IOException("JavaTools failed to parse " + compUnits, exception);
+    }
+    for (Diagnostic<? extends JavaFileObject> diagnostic : diagnostics.getDiagnostics()) {
+      if (diagnostic.getKind() == Diagnostic.Kind.ERROR) {
+        throw new IOException(diagnostic.toString());
+      }
     }
     return data;
   }

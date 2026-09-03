@@ -106,6 +106,8 @@ The Java plugin for Gazelle adds the following flags to the command line options
 | Path of the maven_install.json file.                                                                       |
 
 
+Java sources are parsed with JavaParser, with javac as a fallback for unsupported syntax.
+
 ## Directives
 
 Gazelle can be configured with directives, which are written as top-level comments in build files. Most options that can be set on the command line can also be set using directives. Some options can only be set with directives.

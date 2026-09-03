@@ -92,6 +92,8 @@ public class GrpcServer {
 
     private final Path workspace;
     private final TimeoutHandler timeoutHandler;
+    private final ThreadLocal<JavaSourceParser> javaParser =
+        ThreadLocal.withInitial(JavaSourceParser::new);
 
     GrpcService(Path workspace, TimeoutHandler timeoutHandler) {
       this.workspace = workspace;
@@ -106,6 +108,12 @@ public class GrpcServer {
       try {
         responseObserver.onNext(getImports(request));
         responseObserver.onCompleted();
+      } catch (IOException ex) {
+        responseObserver.onError(
+            Status.INVALID_ARGUMENT
+                .withDescription(ex.getMessage())
+                .withCause(ex)
+                .asRuntimeException());
       } catch (Exception ex) {
         responseObserver.onError(ex);
       } finally {
@@ -113,7 +121,7 @@ public class GrpcServer {
       }
     }
 
-    private Package getImports(ParsePackageRequest request) {
+    private Package getImports(ParsePackageRequest request) throws IOException {
       List<String> files = new ArrayList<>();
       for (int i = 0; i < request.getFilesCount(); i++) {
         files.add(request.getFiles(i));
@@ -144,19 +152,8 @@ public class GrpcServer {
       }
 
       if (!javaFiles.isEmpty()) {
-        try {
-          ClasspathParser parser = new ClasspathParser();
-          ParsedPackageData javaData = parser.parseClasses(directory, javaFiles);
-          data.merge(javaData);
-        } catch (IOException exception) {
-          // If we fail to process a directory, which can happen with the module level processing
-          // or can't parse any of the files, just return an empty response.
-          logger.debug("IOException occurred, returning empty package: {}", exception.getMessage());
-          return Package.newBuilder().setName("").build();
-        } catch (Exception ex) {
-          logger.error("Error parsing Java files", ex);
-          throw ex;
-        }
+        ParsedPackageData javaData = javaParser.get().parseClasses(directory, javaFiles);
+        data.merge(javaData);
       } else {
         logger.debug("No Java files to process, skipping Java parser");
       }
