@@ -94,7 +94,7 @@ func (r Runner) parsePackage(ctx context.Context, request *pb.ParsePackageReques
 		if cached, ok := r.prefetch.packages[request.Rel]; ok {
 			files := slices.Clone(request.Files)
 			slices.Sort(files)
-			// Exclusions and mixed-language packages must use Gazelle's actual selection.
+			// Exclusions must use Gazelle's actual selection.
 			if slices.Equal(files, cached.files) {
 				if err := r.keepParserAlive(ctx); err != nil {
 					return nil, err
@@ -103,7 +103,92 @@ func (r Runner) parsePackage(ctx context.Context, request *pb.ParsePackageReques
 			}
 		}
 	}
-	return r.parseOnDemand(ctx, request)
+	return r.parseMixedPackage(ctx, request)
+}
+
+func (r Runner) parseMixedPackage(ctx context.Context, request *pb.ParsePackageRequest) (*pb.Package, error) {
+	if r.prefetch == nil {
+		return r.parseOnDemand(ctx, request)
+	}
+	// Mixed packages must not introduce another wait for speculative parsing.
+	select {
+	case <-r.prefetch.done:
+	default:
+		return r.parseOnDemand(ctx, request)
+	}
+	cached, ok := r.prefetch.packages[request.Rel]
+	if !ok || cached.metadata.GetName() == "" {
+		return r.parseOnDemand(ctx, request)
+	}
+	var javaFiles, kotlinFiles []string
+	for _, file := range request.Files {
+		switch {
+		case strings.HasSuffix(file, ".java"):
+			javaFiles = append(javaFiles, file)
+		case strings.HasSuffix(file, ".kt"):
+			kotlinFiles = append(kotlinFiles, file)
+		default:
+			return r.parseOnDemand(ctx, request)
+		}
+	}
+	slices.Sort(javaFiles)
+	if len(kotlinFiles) == 0 || !slices.Equal(javaFiles, cached.files) {
+		return r.parseOnDemand(ctx, request)
+	}
+	kotlin, err := r.parseOnDemand(ctx, &pb.ParsePackageRequest{Rel: request.Rel, Files: kotlinFiles})
+	if err != nil {
+		// Java files can change the combined parser's package-validation error.
+		return r.parseOnDemand(ctx, request)
+	}
+	// An empty wire name cannot distinguish a default package from no package declaration.
+	// Let the combined parser retain its validation and error messages in ambiguous cases.
+	if kotlin.GetName() != cached.metadata.GetName() {
+		return r.parseOnDemand(ctx, request)
+	}
+	return mergePackageMetadata(cached.metadata, kotlin), nil
+}
+
+func mergePackageMetadata(a, b *pb.Package) *pb.Package {
+	result := &pb.Package{
+		Name:                                   a.Name,
+		ImportedClasses:                        unionStrings(a.ImportedClasses, b.ImportedClasses),
+		ImportedPackagesWithoutSpecificClasses: unionStrings(a.ImportedPackagesWithoutSpecificClasses, b.ImportedPackagesWithoutSpecificClasses),
+		Mains:                                  unionStrings(a.Mains, b.Mains),
+		ExportedClasses:                        unionStrings(a.ExportedClasses, b.ExportedClasses),
+		InternalClasses:                        unionStrings(a.InternalClasses, b.InternalClasses),
+		DeclaredClasses:                        unionStrings(a.DeclaredClasses, b.DeclaredClasses),
+		PerClassMetadata:                       make(map[string]*pb.PerClassMetadata),
+	}
+	for _, source := range []*pb.Package{a, b} {
+		for name, metadata := range source.PerClassMetadata {
+			target := result.PerClassMetadata[name]
+			if target == nil {
+				target = &pb.PerClassMetadata{
+					PerMethodMetadata: make(map[string]*pb.PerMethodMetadata),
+					PerFieldMetadata:  make(map[string]*pb.PerFieldMetadata),
+				}
+				result.PerClassMetadata[name] = target
+			}
+			target.AnnotationClassNames = unionStrings(target.AnnotationClassNames, metadata.AnnotationClassNames)
+			for method, annotations := range metadata.PerMethodMetadata {
+				target.PerMethodMetadata[method] = &pb.PerMethodMetadata{
+					AnnotationClassNames: unionStrings(target.PerMethodMetadata[method].GetAnnotationClassNames(), annotations.GetAnnotationClassNames()),
+				}
+			}
+			for field, annotations := range metadata.PerFieldMetadata {
+				target.PerFieldMetadata[field] = &pb.PerFieldMetadata{
+					AnnotationClassNames: unionStrings(target.PerFieldMetadata[field].GetAnnotationClassNames(), annotations.GetAnnotationClassNames()),
+				}
+			}
+		}
+	}
+	return result
+}
+
+func unionStrings(a, b []string) []string {
+	values := slices.Concat(a, b)
+	slices.Sort(values)
+	return slices.Compact(values)
 }
 
 func (r Runner) acquireParser(ctx context.Context) error {

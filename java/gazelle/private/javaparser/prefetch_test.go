@@ -84,8 +84,8 @@ func TestPrefetchOnlyReusesTheExactJavaFileSelection(t *testing.T) {
 			}
 		})
 	}
-	if got := client.ordinaryCalls.Load(); got != 3 {
-		t.Fatalf("ordinary calls = %d, want 3", got)
+	if got := client.ordinaryCalls.Load(); got != 4 {
+		t.Fatalf("ordinary calls = %d, want 4", got)
 	}
 }
 
@@ -170,6 +170,143 @@ func TestWaitingForPrefetchRespectsCancellation(t *testing.T) {
 	if _, err := runner.parsePackage(ctx, &pb.ParsePackageRequest{Files: []string{"A.java"}}); err != context.Canceled {
 		t.Fatalf("cancelled parse returned %v", err)
 	}
+}
+
+func TestMixedPackagesReuseOnlyExactCompletedJavaResults(t *testing.T) {
+	for _, test := range []struct {
+		name                       string
+		files                      []string
+		javaName, kotlinName       string
+		pending, missing, disabled bool
+		wantRequests               [][]string
+	}{
+		{name: "exact", files: []string{"A.java", "B.java", "C.kt"}, javaName: "example", kotlinName: "example", wantRequests: [][]string{{"C.kt"}}},
+		{name: "reordered", files: []string{"C.kt", "B.java", "A.java"}, javaName: "example", kotlinName: "example", wantRequests: [][]string{{"C.kt"}}},
+		{name: "excluded Java file", files: []string{"A.java", "C.kt"}, javaName: "example", kotlinName: "example"},
+		{name: "new Java file", files: []string{"A.java", "B.java", "New.java", "C.kt"}, javaName: "example", kotlinName: "example"},
+		{name: "unfinished prefetch", files: []string{"A.java", "B.java", "C.kt"}, javaName: "example", kotlinName: "example", pending: true},
+		{name: "failed or missing prefetch", files: []string{"A.java", "B.java", "C.kt"}, javaName: "example", kotlinName: "example", missing: true},
+		{name: "disabled prefetch", files: []string{"A.java", "B.java", "C.kt"}, javaName: "example", kotlinName: "example", disabled: true},
+		{name: "unnamed Java package", files: []string{"A.java", "B.java", "C.kt"}, kotlinName: "example"},
+		{name: "unnamed Kotlin package", files: []string{"A.java", "B.java", "C.kt"}, javaName: "example", wantRequests: [][]string{{"C.kt"}, {"A.java", "B.java", "C.kt"}}},
+		{name: "different packages", files: []string{"A.java", "B.java", "C.kt"}, javaName: "example", kotlinName: "other", wantRequests: [][]string{{"C.kt"}, {"A.java", "B.java", "C.kt"}}},
+		{name: "other files", files: []string{"A.java", "B.java", "C.kt", "D.scala"}, javaName: "example", kotlinName: "example"},
+		{name: "Kotlin only", files: []string{"C.kt"}, javaName: "example", kotlinName: "example"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			client := &mixedPackageClient{metadata: &pb.Package{Name: test.kotlinName}}
+			pending := &prefetch{done: make(chan struct{}), packages: map[string]prefetchedPackage{}}
+			if !test.missing {
+				pending.packages["src"] = prefetchedPackage{files: []string{"A.java", "B.java"}, metadata: &pb.Package{Name: test.javaName}}
+			}
+			if !test.pending {
+				close(pending.done)
+			}
+			runner := Runner{rpc: client, prefetch: pending, logger: zerolog.Nop()}
+			if test.disabled {
+				runner.prefetch = nil
+			}
+			originalFiles := append([]string(nil), test.files...)
+			result, err := runner.ParsePackage(context.Background(), &ParsePackageRequest{Rel: "src", Files: test.files})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := test.wantRequests
+			if want == nil {
+				want = [][]string{test.files}
+			}
+			if !reflect.DeepEqual(client.requests, want) {
+				t.Fatalf("requests = %v, want %v", client.requests, want)
+			}
+			if !reflect.DeepEqual(test.files, originalFiles) || result.Files.Len() != len(test.files) {
+				t.Fatal("original file selection changed")
+			}
+		})
+	}
+}
+
+func TestMixedPackageMetadataIsUnionedWithoutChangingInputs(t *testing.T) {
+	javaData := packageMetadata("example.Java")
+	kotlinData := packageMetadata("example.Kotlin")
+	pending := &prefetch{
+		done:     make(chan struct{}),
+		packages: map[string]prefetchedPackage{"src": {files: []string{"A.java"}, metadata: javaData}},
+	}
+	close(pending.done)
+	client := &mixedPackageClient{metadata: kotlinData}
+	runner := Runner{rpc: client, prefetch: pending}
+	result, err := runner.parsePackage(context.Background(), &pb.ParsePackageRequest{Rel: "src", Files: []string{"A.java", "B.kt"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := packageMetadata("example.Java", "example.Kotlin")
+	if !reflect.DeepEqual(result, expected) {
+		t.Fatalf("metadata = %v, want %v", result, expected)
+	}
+	result.ImportedClasses[0] = "changed"
+	result.PerClassMetadata["example.Shared"].AnnotationClassNames[0] = "changed"
+	result.PerClassMetadata["example.Shared"].PerMethodMetadata["method"].AnnotationClassNames[0] = "changed"
+	result.PerClassMetadata["example.Shared"].PerFieldMetadata["field"].AnnotationClassNames[0] = "changed"
+	if !reflect.DeepEqual(javaData, packageMetadata("example.Java")) || !reflect.DeepEqual(kotlinData, packageMetadata("example.Kotlin")) {
+		t.Fatal("merging or using the result changed an input")
+	}
+}
+
+func TestMixedPackagePreservesCombinedValidationErrors(t *testing.T) {
+	for _, kotlinError := range []error{nil, fmt.Errorf("Kotlin-only package validation failed")} {
+		t.Run(fmt.Sprint(kotlinError), func(t *testing.T) {
+			client := &mixedPackageClient{
+				metadata:      &pb.Package{Name: "other"},
+				combinedError: fmt.Errorf("expected exactly one Java package"),
+				kotlinError:   kotlinError,
+			}
+			pending := &prefetch{done: make(chan struct{}), packages: map[string]prefetchedPackage{
+				"src": {files: []string{"A.java"}, metadata: &pb.Package{Name: "example"}},
+			}}
+			close(pending.done)
+			runner := Runner{rpc: client, prefetch: pending}
+			_, err := runner.parsePackage(context.Background(), &pb.ParsePackageRequest{Rel: "src", Files: []string{"A.java", "B.kt"}})
+			if err != client.combinedError {
+				t.Fatalf("error = %v, want the combined parser's error", err)
+			}
+		})
+	}
+}
+
+func packageMetadata(names ...string) *pb.Package {
+	values := append(append([]string(nil), names...), "example.Shared")
+	return &pb.Package{
+		Name:                                   "example",
+		ImportedClasses:                        append([]string(nil), values...),
+		ImportedPackagesWithoutSpecificClasses: append([]string(nil), values...),
+		ExportedClasses:                        append([]string(nil), values...),
+		InternalClasses:                        append([]string(nil), values...),
+		DeclaredClasses:                        append([]string(nil), values...),
+		Mains:                                  append([]string(nil), values...),
+		PerClassMetadata: map[string]*pb.PerClassMetadata{
+			"example.Shared": {
+				AnnotationClassNames: append([]string(nil), values...),
+				PerMethodMetadata:    map[string]*pb.PerMethodMetadata{"method": {AnnotationClassNames: append([]string(nil), values...)}},
+				PerFieldMetadata:     map[string]*pb.PerFieldMetadata{"field": {AnnotationClassNames: append([]string(nil), values...)}},
+			},
+		},
+	}
+}
+
+type mixedPackageClient struct {
+	pb.JavaParserClient
+	metadata      *pb.Package
+	requests      [][]string
+	combinedError error
+	kotlinError   error
+}
+
+func (c *mixedPackageClient) ParsePackage(_ context.Context, request *pb.ParsePackageRequest, _ ...grpc.CallOption) (*pb.Package, error) {
+	c.requests = append(c.requests, append([]string(nil), request.Files...))
+	if len(request.Files) > 1 && c.combinedError != nil {
+		return nil, c.combinedError
+	}
+	return c.metadata, c.kotlinError
 }
 
 func writeJavaFile(t *testing.T, root, relative string) {
