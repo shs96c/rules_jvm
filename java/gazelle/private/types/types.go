@@ -32,7 +32,8 @@ type ClassName struct {
 	bareOuterClassName string
 	/// innerClassNames contains all of the class-names nested inside bareOuterClassName, but excluding bareOuterClassName.
 	/// i.e. for `com.example.OuterClass.InnerClass.EvenMoreInnerClass`, this will be ["InnerClass", "EvenMoreInnerClass"].
-	innerClassNames []string
+	innerClassNames         []string
+	fullyQualifiedClassName string
 }
 
 func (c *ClassName) PackageName() PackageName {
@@ -44,28 +45,25 @@ func (c *ClassName) BareOuterClassName() string {
 }
 
 func (c *ClassName) FullyQualifiedOuterClassName() string {
-	var parts []string
-	if c.packageName.Name != "" {
-		parts = append(parts, strings.Split(c.packageName.Name, ".")...)
+	if c.packageName.Name == "" {
+		return c.bareOuterClassName
 	}
-	parts = append(parts, c.bareOuterClassName)
-	return strings.Join(parts, ".")
+	return c.fullyQualifiedClassName[:len(c.packageName.Name)+1+len(c.bareOuterClassName)]
 }
 
 func (c *ClassName) FullyQualifiedClassName() string {
-	var parts []string
-	if c.packageName.Name != "" {
-		parts = append(parts, strings.Split(c.packageName.Name, ".")...)
-	}
-	parts = append(parts, c.bareOuterClassName)
-	parts = append(parts, c.innerClassNames...)
-	return strings.Join(parts, ".")
+	return c.fullyQualifiedClassName
 }
 
 func NewClassName(packageName PackageName, bareOuterClassName string) ClassName {
+	fullyQualified := bareOuterClassName
+	if packageName.Name != "" {
+		fullyQualified = packageName.Name + "." + bareOuterClassName
+	}
 	return ClassName{
-		packageName:        packageName,
-		bareOuterClassName: bareOuterClassName,
+		packageName:             packageName,
+		bareOuterClassName:      bareOuterClassName,
+		fullyQualifiedClassName: fullyQualified,
 	}
 }
 
@@ -95,9 +93,10 @@ func ParseClassName(fullyQualified string) (*ClassName, error) {
 	}
 
 	return &ClassName{
-		packageName:        packageName,
-		bareOuterClassName: parts[indexOfOuterClassName],
-		innerClassNames:    innerClassNames,
+		packageName:             packageName,
+		bareOuterClassName:      parts[indexOfOuterClassName],
+		innerClassNames:         innerClassNames,
+		fullyQualifiedClassName: fullyQualified,
 	}, nil
 }
 

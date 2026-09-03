@@ -5,6 +5,30 @@ import (
 	"testing"
 )
 
+var classNameResult string
+
+func TestFullyQualifiedNamesDoNotAllocate(t *testing.T) {
+	for _, name := range []string{"com.example.Outer.Inner", "Outer.Inner", "com.example.Outer.", "Outer"} {
+		t.Run(name, func(t *testing.T) {
+			parsed, err := ParseClassName(name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			constructed := NewClassName(parsed.PackageName(), parsed.BareOuterClassName())
+			for _, class := range []*ClassName{parsed, &constructed} {
+				for _, getName := range []func() string{class.FullyQualifiedClassName, class.FullyQualifiedOuterClassName} {
+					if allocations := testing.AllocsPerRun(100, func() { classNameResult = getName() }); allocations != 0 {
+						t.Errorf("name lookup allocated %g times", allocations)
+					}
+				}
+			}
+			if got, want := parsed.FullyQualifiedOuterClassName(), constructed.FullyQualifiedClassName(); got != want {
+				t.Errorf("outer name: got %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestParseClassName(t *testing.T) {
 	for name, tc := range map[string]struct {
 		from    string
@@ -82,6 +106,7 @@ func TestParseClassName(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := ParseClassName(tc.from)
+			tc.want.fullyQualifiedClassName = tc.from
 			if tc.wantErr && err != nil {
 				t.Fatal("wanted error, got nil error")
 			}
