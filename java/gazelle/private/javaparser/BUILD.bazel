@@ -3,6 +3,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "javaparser",
     srcs = [
+        "cache.go",
+        "cache_lock_other.go",
+        "cache_lock_unix.go",
+        "cache_lock_windows.go",
         "cpus.go",
         "javaparser.go",
         "prefetch.go",
@@ -19,13 +23,32 @@ go_library(
         "@com_github_rs_zerolog//:zerolog",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//status",
-    ],
+        "@org_golang_google_protobuf//proto",
+    ] + select({
+        "@rules_go//go/platform:android": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:ios": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:linux": [
+            "@org_golang_x_sys//unix",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "javaparser_test",
     size = "small",
     srcs = [
+        "cache_test.go",
         "cpus_test.go",
         "javaparser_test.go",
         "prefetch_test.go",

@@ -307,6 +307,8 @@ use_repo(
     "com_github_stretchr_testify",
     "net_starlark_go",
     "org_golang_google_grpc",
+    "org_golang_google_protobuf",
+    "org_golang_x_sys",
     "org_golang_x_tools",
     "org_golang_x_tools_go_vcs",
 )

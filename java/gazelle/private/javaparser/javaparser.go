@@ -20,6 +20,7 @@ type Runner struct {
 	rpc           pb.JavaParserClient
 	serverManager *servermanager.ServerManager
 	prefetch      *prefetch
+	cache         *parseCache
 	parserSlots   chan struct{}
 }
 

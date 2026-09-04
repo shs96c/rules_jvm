@@ -28,6 +28,8 @@ type Configurer struct {
 	mavenIndexFile        string
 	javaBatchSize         int
 	javaParserWorkers     int
+	javaCacheDir          string
+	javaCacheSize         int
 	javaSourceRoots       []javaparser.SourceRoot
 }
 
@@ -40,6 +42,8 @@ func NewConfigurer(lang *javaLang) *Configurer {
 }
 
 func (jc *Configurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Config) {
+	fs.StringVar(&jc.javaCacheDir, "java-parser-cache-dir", "", "Directory for persistent Java/Kotlin metadata; defaults to the user cache directory.")
+	fs.IntVar(&jc.javaCacheSize, "java-parser-cache-size", 32, "Parser cache disk budget in MiB, including atomic replacement; 0 disables caching.")
 	fs.IntVar(&jc.javaBatchSize, "java-batch-size", 512, "Maximum Java packages per parallel parser request; 0 disables prefetch.")
 	fs.IntVar(&jc.javaParserWorkers, "java-parser-workers", 0, "Maximum concurrent parser requests; 0 uses available CPUs, including container limits.")
 	fs.Var(&jc.annotationToAttribute, "java-annotation-to-attribute", "Mapping of annotations (on test classes) to attributes which should be set for that test rule. Examples: com.example.annotations.FlakyTest=flaky=True com.example.annotations.SlowTest=timeout=\"long\"")
@@ -49,6 +53,9 @@ func (jc *Configurer) RegisterFlags(fs *flag.FlagSet, cmd string, c *config.Conf
 }
 
 func (jc *Configurer) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
+	if jc.javaCacheSize < 0 {
+		return fmt.Errorf("java-parser-cache-size must not be negative")
+	}
 	if jc.javaParserWorkers < 0 {
 		return fmt.Errorf("java-parser-workers must not be negative")
 	}
@@ -377,6 +384,7 @@ func (jc *Configurer) Configure(c *config.Config, rel string, f *rule.File) {
 			jc.lang.logger.Fatal().Err(err).Msg("could not start javaparser")
 		}
 		jc.lang.parser = runner
+		runner.EnableCache(c.RepoRoot, jc.javaCacheDir, int64(jc.javaCacheSize)<<20)
 		runner.StartPrefetch(c.RepoRoot, jc.javaSourceRoots, jc.javaBatchSize)
 	}
 

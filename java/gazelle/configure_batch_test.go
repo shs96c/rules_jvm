@@ -96,3 +96,32 @@ func TestJavaParserWorkerFlags(t *testing.T) {
 		})
 	}
 }
+
+func TestParserCacheFlags(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		args    []string
+		size    int
+		dir     string
+		invalid bool
+	}{
+		{"default", nil, 32, "", false},
+		{"disabled", []string{"-java-parser-cache-size=0"}, 0, "", false},
+		{"custom", []string{"-java-parser-cache-size=8", "-java-parser-cache-dir=cache"}, 8, "cache", false},
+		{"negative", []string{"-java-parser-cache-size=-1"}, -1, "", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c := &config.Config{Exts: make(map[string]interface{})}
+			configurer := NewConfigurer(NewLanguage().(*javaLang))
+			fs := flag.NewFlagSet(test.name, flag.ContinueOnError)
+			configurer.RegisterFlags(fs, "update", c)
+			if err := fs.Parse(test.args); err != nil {
+				t.Fatal(err)
+			}
+			err := configurer.CheckFlags(fs, c)
+			if (err != nil) != test.invalid || configurer.javaCacheSize != test.size || configurer.javaCacheDir != test.dir {
+				t.Fatalf("cache size=%d, dir=%q, error=%v", configurer.javaCacheSize, configurer.javaCacheDir, err)
+			}
+		})
+	}
+}

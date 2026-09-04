@@ -9,11 +9,18 @@ option java_package = "com.gazelle.java.javaparser.v0";
 // JavaParser service is the RPCs between the gazelle java extension and the
 // java and Kotlin parsers.
 service JavaParser {
+  // Fingerprint the running parser and its dependencies for metadata reuse.
+  rpc CacheIdentity(CacheIdentityRequest) returns (CacheIdentityResponse) {}
   // Parse a Java or Kotlin package.
   rpc ParsePackage(ParsePackageRequest) returns (Package) {}
 
   // Speculatively parse independent Java packages, isolating failures.
   rpc ParseJavaPackages(ParseJavaPackagesRequest) returns (ParseJavaPackagesResponse) {}
+}
+
+message CacheIdentityRequest {}
+message CacheIdentityResponse {
+  string identity = 1;
 }
 
 message ParseJavaPackagesRequest {

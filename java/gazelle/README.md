@@ -71,6 +71,29 @@ Additionally, some configuration can only be done by flag. See the
 `RegisterFlags` function in [configure.go](configure.go) for a list of these
 options.
 
+## Parser cache
+
+Java and Kotlin parsing results are cached between runs. The cache stores compressed
+package metadata, keyed by source contents, the exact file selection and order,
+the parser and its dependencies, the Java runtime and the Gazelle executable.
+Identical inputs at the same relative paths can reuse entries across clones and
+worktrees. The checkout's absolute path is not part of the cache key.
+Changing BUILD directives or dependencies still reruns generation and resolution.
+Errors are not cached, and unreadable or damaged cache data falls back to parsing.
+
+The default disk budget is **32 MiB** across repositories and parser versions.
+A packed snapshot uses at most half the budget, reserving the other half for atomic
+replacement. Least recently used entries are evicted when saving the snapshot;
+oversized entries are skipped. Concurrent writers use an OS lock, and a busy cache
+does not block generation. Cached metadata stays local under the operating system's
+user cache directory, in `gazelle-jvm`.
+
+- `-java-parser-cache-size=N` sets the disk budget in MiB; `0` disables the cache.
+- `-java-parser-cache-dir=PATH` selects a dedicated cache directory.
+
+The first run populates the cache. Later runs still read and hash source files, but
+only cache misses need parsing. Deleting the cache is safe.
+
 ## Source code restrictions and limitations
 
 Currently, the gazelle plugin makes the following assumptions about the code it's generating BUILD files for:

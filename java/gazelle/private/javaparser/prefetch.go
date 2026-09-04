@@ -209,7 +209,7 @@ func (r Runner) releaseParser() {
 	}
 }
 
-func (r Runner) parseOnDemand(ctx context.Context, request *pb.ParsePackageRequest) (*pb.Package, error) {
+func (r Runner) parseUncached(ctx context.Context, request *pb.ParsePackageRequest) (*pb.Package, error) {
 	if err := r.acquireParser(ctx); err != nil {
 		return nil, err
 	}
@@ -217,7 +217,7 @@ func (r Runner) parseOnDemand(ctx context.Context, request *pb.ParsePackageReque
 	return r.rpc.ParsePackage(ctx, request)
 }
 
-func (r Runner) parseBatch(ctx context.Context, batch []*pb.ParsePackageRequest) (*pb.ParseJavaPackagesResponse, error) {
+func (r Runner) parseBatchUncached(ctx context.Context, batch []*pb.ParsePackageRequest) (*pb.ParseJavaPackagesResponse, error) {
 	if err := r.acquireParser(ctx); err != nil {
 		return nil, err
 	}
@@ -230,9 +230,18 @@ func (r Runner) parseBatch(ctx context.Context, batch []*pb.ParsePackageRequest)
 }
 
 func (r Runner) keepParserAlive(ctx context.Context) error {
-	now := time.Since(r.prefetch.started).Nanoseconds()
-	last := r.prefetch.lastKeepAlive.Load()
-	if now-last < int64(10*time.Second) || !r.prefetch.lastKeepAlive.CompareAndSwap(last, now) {
+	var started time.Time
+	var ping *atomic.Int64
+	if r.prefetch != nil {
+		started, ping = r.prefetch.started, &r.prefetch.lastKeepAlive
+	} else if r.cache != nil {
+		started, ping = r.cache.started, &r.cache.lastKeepAlive
+	} else {
+		return nil
+	}
+	now := time.Since(started).Nanoseconds()
+	last := ping.Load()
+	if now-last < int64(10*time.Second) || !ping.CompareAndSwap(last, now) {
 		return nil
 	}
 	// Reusing metadata must not let the parser's idle timeout expire before an uncached request.

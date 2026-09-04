@@ -2,6 +2,8 @@ package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
 import static java.nio.file.StandardCopyOption.ATOMIC_MOVE;
 
+import com.gazelle.java.javaparser.v0.CacheIdentityRequest;
+import com.gazelle.java.javaparser.v0.CacheIdentityResponse;
 import com.gazelle.java.javaparser.v0.JavaParserGrpc;
 import com.gazelle.java.javaparser.v0.Package;
 import com.gazelle.java.javaparser.v0.Package.Builder;
@@ -20,18 +22,29 @@ import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
 import io.grpc.protobuf.services.ProtoReflectionService;
 import io.grpc.stub.StreamObserver;
+import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
+import java.lang.management.ManagementFactory;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.DigestOutputStream;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.SortedSet;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.jar.Attributes;
+import java.util.jar.JarFile;
 import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -97,6 +110,47 @@ public class GrpcServer {
     server.awaitTermination();
   }
 
+  static String parserIdentity(List<Path> classpath, String runtime) throws IOException {
+    try {
+      MessageDigest identity = MessageDigest.getInstance("SHA-256");
+      identity.update(runtime.getBytes(StandardCharsets.UTF_8));
+      for (Path file : classpath) {
+        if (!Files.isRegularFile(file)) {
+          throw new IOException("Cannot fingerprint parser classpath entry: " + file);
+        }
+        MessageDigest contents = MessageDigest.getInstance("SHA-256");
+        try (var input = Files.newInputStream(file)) {
+          input.transferTo(new DigestOutputStream(OutputStream.nullOutputStream(), contents));
+        }
+        identity.update(contents.digest());
+      }
+      return HexFormat.of().formatHex(identity.digest());
+    } catch (NoSuchAlgorithmException ex) {
+      throw new IllegalStateException(ex);
+    }
+  }
+
+  private static void addClasspathFile(Path path, Set<Path> files) throws IOException {
+    Path file = path.toAbsolutePath().normalize();
+    // JAR manifests can name optional dependencies that the JVM skips when absent.
+    if (!Files.exists(file) || !files.add(file)) {
+      return;
+    }
+    // Java launchers can hide dependencies behind a manifest-only classpath JAR.
+    try (var jar = new JarFile(file.toFile())) {
+      var manifest = jar.getManifest();
+      if (manifest == null) {
+        return;
+      }
+      String dependencies = manifest.getMainAttributes().getValue(Attributes.Name.CLASS_PATH);
+      if (dependencies != null) {
+        for (String dependency : dependencies.trim().split("\\s+")) {
+          addClasspathFile(Path.of(file.toUri().resolve(dependency)), files);
+        }
+      }
+    }
+  }
+
   static class GrpcService extends JavaParserGrpc.JavaParserImplBase implements AutoCloseable {
 
     private final Path workspace;
@@ -136,6 +190,44 @@ public class GrpcServer {
         if (kotlinParser != null) {
           kotlinParser.close();
         }
+      }
+    }
+
+    @Override
+    public void cacheIdentity(
+        CacheIdentityRequest request, StreamObserver<CacheIdentityResponse> responseObserver) {
+      timeoutHandler.startedRequest();
+      try {
+        Set<Path> classpath = new LinkedHashSet<>();
+        for (String file : System.getProperty("java.class.path").split(File.pathSeparator)) {
+          addClasspathFile(Path.of(file), classpath);
+        }
+        String runtime =
+            Arrays.stream(
+                    new String[] {
+                      "java.runtime.version",
+                      "java.vendor",
+                      "java.vm.name",
+                      "os.arch",
+                      "file.encoding",
+                      "user.language",
+                      "user.country"
+                    })
+                .map(name -> name + "=" + System.getProperty(name, ""))
+                .collect(Collectors.joining("\n"));
+        responseObserver.onNext(
+            CacheIdentityResponse.newBuilder()
+                .setIdentity(
+                    parserIdentity(
+                        new ArrayList<>(classpath),
+                        runtime + ManagementFactory.getRuntimeMXBean().getInputArguments()))
+                .build());
+        responseObserver.onCompleted();
+      } catch (Exception ex) {
+        responseObserver.onError(
+            Status.UNAVAILABLE.withCause(ex).withDescription(ex.toString()).asRuntimeException());
+      } finally {
+        timeoutHandler.finishedRequest();
       }
     }
 

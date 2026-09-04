@@ -1,6 +1,7 @@
 package com.github.bazel_contrib.contrib_rules_jvm.javaparser.generators;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -9,6 +10,8 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.gazelle.java.javaparser.v0.CacheIdentityRequest;
+import com.gazelle.java.javaparser.v0.CacheIdentityResponse;
 import com.gazelle.java.javaparser.v0.Package;
 import com.gazelle.java.javaparser.v0.ParseJavaPackagesRequest;
 import com.gazelle.java.javaparser.v0.ParseJavaPackagesResponse;
@@ -26,6 +29,43 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 class GrpcServerTest {
+  @Test
+  void cacheIdentityFingerprintsTheRuntimeClasspath(@TempDir Path workspace) {
+    TimeoutHandler timeout = new TimeoutHandler(0);
+    try (var service = new GrpcServer.GrpcService(workspace, timeout)) {
+      var first = new RecordingObserver<CacheIdentityResponse>();
+      var second = new RecordingObserver<CacheIdentityResponse>();
+      service.cacheIdentity(CacheIdentityRequest.getDefaultInstance(), first);
+      service.cacheIdentity(CacheIdentityRequest.getDefaultInstance(), second);
+      assertTrue(first.completed);
+      assertEquals(64, first.value.getIdentity().length());
+      assertEquals(first.value, second.value);
+    } finally {
+      timeout.cancelOutstandingAndStopScheduling();
+    }
+  }
+
+  @Test
+  void cacheIdentityChangesWithParserDependenciesAndRuntime(@TempDir Path workspace)
+      throws Exception {
+    Path parser = workspace.resolve("parser.jar");
+    Path dependency = workspace.resolve("dependency.jar");
+    Files.writeString(parser, "parser implementation");
+    Files.writeString(dependency, "dependency v1");
+    var files = List.of(parser, dependency);
+    String initial = GrpcServer.parserIdentity(files, "runtime-v1");
+    assertEquals(initial, GrpcServer.parserIdentity(files, "runtime-v1"));
+    assertNotEquals(initial, GrpcServer.parserIdentity(files, "runtime-v2"));
+    Files.writeString(dependency, "dependency v2");
+    assertNotEquals(initial, GrpcServer.parserIdentity(files, "runtime-v1"));
+    Files.writeString(dependency, "dependency v1");
+    Files.writeString(parser, "changed parser");
+    assertNotEquals(initial, GrpcServer.parserIdentity(files, "runtime-v1"));
+    assertThrows(
+        java.io.IOException.class,
+        () -> GrpcServer.parserIdentity(List.of(workspace), "runtime-v1"));
+  }
+
   @Test
   void kotlinParserIsLazyReusedAndClosed(@TempDir Path workspace) {
     var parser = mock(KtParser.class);
